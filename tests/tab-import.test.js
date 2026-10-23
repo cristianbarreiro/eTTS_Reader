@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   classifyTab,
   combineImportedText,
+  createLocalPdfPreview,
   extractReadablePage,
   importCurrentTab,
+  localPdfRecoveryActions,
   safeSourceUrl
 } from "../src/tab-import.js";
 
@@ -207,6 +209,119 @@ test("PDF fetch failures, scan-only files, and oversized PDFs never report a suc
     extractPdf: async () => { assert.fail("oversized PDF must stop before PDF extraction"); }
   });
   assert.equal(oversized.state, "too-large");
+});
+
+test("local PDF fetching requires Edge file access and never injects into the PDF viewer", async () => {
+  const tab = { id: 31, url: "file:///C:/docs/report.pdf#page=2", title: "Report.pdf" };
+  let fetchCalls = 0;
+  const denied = await importCurrentTab({
+    targetTab: tab,
+    fileAccessAllowed: false,
+    scriptingApi: null,
+    fetchImpl: async () => { fetchCalls++; throw new Error("must not fetch without permission"); }
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.state, "file-access-disabled");
+  assert.equal(denied.type, "local-pdf");
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(localPdfRecoveryActions(denied), { selectPdf: true, previewSelectedPdf: true, retryFileAccess: true });
+
+  let fetchOptions;
+  let extractedFile;
+  const statuses = [];
+  const success = await importCurrentTab({
+    targetTab: tab,
+    fileAccessAllowed: true,
+    scriptingApi: null,
+    fetchImpl: async (url, options) => {
+      fetchCalls++;
+      assert.equal(url, tab.url);
+      fetchOptions = options;
+      return new Response(new Blob(["%PDF-1.7 local bytes"]), { headers: { "content-type": "application/pdf" } });
+    },
+    onStatus: ({ state }) => statuses.push(state),
+    extractPdf: async (file) => { extractedFile = file; return "Local PDF text."; }
+  });
+  assert.equal(success.ok, true);
+  assert.equal(success.type, "local-pdf");
+  assert.equal(success.text, "Local PDF text.");
+  assert.equal(success.sourceUrl, "");
+  assert.equal(fetchOptions.credentials, "omit");
+  assert.equal(fetchOptions.referrerPolicy, "no-referrer");
+  assert.equal(fetchOptions.cache, "no-store");
+  assert.equal(extractedFile.name, "report.pdf");
+  assert.equal(extractedFile.type, "application/pdf");
+  assert.deepEqual(statuses, ["detecting", "retrieving-local-pdf", "extracting-pdf"]);
+  assert.equal(fetchCalls, 1);
+  assert.deepEqual(localPdfRecoveryActions({ state: "file-access-disabled", type: "local-pdf" }), {
+    selectPdf: true, previewSelectedPdf: true, retryFileAccess: true
+  });
+});
+
+test("manual local PDF selection produces a bounded preview without exposing a local path", () => {
+  const file = { name: "Selected.pdf" };
+  const preview = createLocalPdfPreview(file, "Extracted text", 8);
+  assert.deepEqual(preview, {
+    ok: true,
+    state: "complete",
+    title: "Selected.pdf",
+    sourceUrl: "",
+    type: "local-pdf",
+    text: "Extracte",
+    characters: 8,
+    truncated: true,
+    message: "PDF leído localmente desde el archivo seleccionado. Revisa el texto y elige Reemplazar o Añadir para aplicarlo."
+  });
+});
+
+test("local PDF errors preserve manual recovery and never accept unrelated bytes or redirects", async () => {
+  const tab = { id: 32, url: "file:///C:/docs/report.pdf", title: "Report.pdf" };
+  const invalid = await importCurrentTab({
+    targetTab: tab, fileAccessAllowed: true, scriptingApi: null,
+    fetchImpl: async () => new Response("not a PDF"),
+    extractPdf: async () => { assert.fail("invalid signature must stop before extraction"); }
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.state, "local-pdf-unavailable");
+  assert.equal(localPdfRecoveryActions(invalid).previewSelectedPdf, true);
+
+  const redirectedResponse = new Response(new Blob(["%PDF-1.7 bytes"]), { headers: { "content-type": "application/pdf" } });
+  Object.defineProperty(redirectedResponse, "url", { value: "file:///C:/docs/other.pdf" });
+  const redirected = await importCurrentTab({
+    targetTab: tab, fileAccessAllowed: true, scriptingApi: null,
+    fetchImpl: async () => redirectedResponse,
+    extractPdf: async () => { assert.fail("a redirected local file must not be extracted"); }
+  });
+  assert.equal(redirected.ok, false);
+  assert.equal(redirected.state, "local-pdf-unavailable");
+
+  const failed = await importCurrentTab({
+    targetTab: tab, fileAccessAllowed: true, scriptingApi: null,
+    fetchImpl: async () => { throw new Error("Failed to fetch"); },
+    extractPdf: async () => { assert.fail("failed fetch must stop before extraction"); }
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.state, "local-pdf-unavailable");
+  assert.match(failed.message, /selecciona el archivo PDF original manualmente/i);
+});
+
+test("local PDF size limit and empty text remain explicit errors", async () => {
+  const tab = { id: 33, url: "file:///C:/docs/report.pdf", title: "Report.pdf" };
+  const oversized = await importCurrentTab({
+    targetTab: tab, fileAccessAllowed: true, scriptingApi: null, maxBytes: 3,
+    fetchImpl: async () => new Response(null, { headers: { "content-length": "4" } }),
+    extractPdf: async () => { assert.fail("oversized files must stop before extraction"); }
+  });
+  assert.equal(oversized.state, "too-large");
+  assert.equal(oversized.type, "local-pdf");
+
+  const scan = await importCurrentTab({
+    targetTab: tab, fileAccessAllowed: true, scriptingApi: null,
+    fetchImpl: async () => new Response(new Blob(["%PDF-1.7 scanned"])),
+    extractPdf: async () => { throw new Error("Este PDF no contiene texto extraíble. Puede ser un escaneo."); }
+  });
+  assert.equal(scan.state, "no-text");
+  assert.equal(scan.type, "local-pdf");
 });
 
 test("replace, append, duplicate confirmation, and editor-size limits are explicit", () => {

@@ -9,7 +9,7 @@ function event() {
   };
 }
 
-async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" }, scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false } } = {}) {
+async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" }, scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false }, fileAccessAllowed = false } = {}) {
   const values = new Map();
   const calls = { panel: [], scripts: [], contextMenu: [], messages: [] };
   const api = {
@@ -19,6 +19,7 @@ async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https:/
       onInstalled: event(), onMessage: event(),
       async sendMessage(message) { calls.messages.push(message); return { ok: true }; }
     },
+    extension: { async isAllowedFileSchemeAccess() { return fileAccessAllowed; } },
     storage: { session: {
       async set(record) { for (const [key, value] of Object.entries(record)) values.set(key, value); },
       async get(key) { return { [key]: values.get(key) }; },
@@ -102,6 +103,54 @@ test("remote PDF handoff includes a token and rejects navigation before extracti
     assert.equal(validation.ok, false);
     assert.equal(validation.state, "stale-target");
   } finally { harness.restore(); }
+});
+
+test("local PDF handoff respects Edge file access permission and does not inject into the viewer", async () => {
+  const pdfTab = { id: 21, windowId: 2, url: "file:///C:/docs/report.pdf", title: "report.pdf" };
+  const denied = await loadBackground({ initialTab: pdfTab, fileAccessAllowed: false });
+  try {
+    denied.api.action.onClicked.fire(pdfTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await denied.send({ target: "background", command: "extract-tab" });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "file-access-disabled");
+    assert.equal(result.type, "local-pdf");
+    assert.match(result.message, /Permitir el acceso a direcciones URL de archivo/);
+    assert.equal(denied.calls.scripts.length, 0);
+  } finally { denied.restore(); }
+
+  const allowed = await loadBackground({ initialTab: pdfTab, fileAccessAllowed: true });
+  try {
+    allowed.api.action.onClicked.fire(pdfTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await allowed.send({ target: "background", command: "extract-tab" });
+    assert.equal(result.ok, true);
+    assert.equal(result.state, "local-pdf-target");
+    assert.equal(result.fileAccessAllowed, true);
+    assert.equal(result.targetTab.url, pdfTab.url);
+    assert.ok(result.targetToken);
+    assert.equal(allowed.calls.scripts.length, 0);
+
+    allowed.api.tabs.activeTab = { ...pdfTab, url: "file:///C:/docs/other.pdf" };
+    const validation = await allowed.send({
+      target: "background", command: "validate-import-target", expectedToken: result.targetToken
+    });
+    assert.equal(validation.ok, false);
+    assert.equal(validation.state, "stale-target");
+  } finally { allowed.restore(); }
+});
+
+test("local PDF permission status is reported conservatively when Edge cannot confirm it", async () => {
+  const hiddenUrlPdf = { id: 22, windowId: 2, url: "", title: "Hidden.pdf" };
+  const unknown = await loadBackground({ initialTab: hiddenUrlPdf, fileAccessAllowed: null });
+  try {
+    unknown.api.action.onClicked.fire(hiddenUrlPdf);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await unknown.send({ target: "background", command: "extract-tab" });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "local-pdf-unavailable");
+    assert.equal(result.type, "local-pdf");
+  } finally { unknown.restore(); }
 });
 
 test("context-menu selection is captured before focus changes and delivered as selection text", async () => {

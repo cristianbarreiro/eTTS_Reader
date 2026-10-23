@@ -62,6 +62,7 @@ textarea { display: block; width: 100%; min-height: 112px; max-height: 180px; re
 .storage-row { flex-wrap: wrap; justify-content: flex-start; padding-top: 8px; border-top: 1px solid var(--border); }
 .storage-row .hint { flex: 1 1 100%; }
 .file-fallback { margin: 0 0 8px; }
+.file-fallback-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .library-card { padding: 0; overflow: hidden; }
 .library-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 15px; color: var(--text); font-size: 14px; font-weight: 700; cursor: pointer; list-style: none; }
 .library-card > summary::-webkit-details-marker { display: none; }

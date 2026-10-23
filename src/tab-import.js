@@ -53,7 +53,7 @@ export function classifyTab(tab) {
   if (url.protocol === "file:") {
     const extension = extensionFromUrl(value);
     if (extension === "pdf") {
-      return { kind: "local-pdf", extension, message: "Edge no permite recuperar de forma fiable los bytes de este PDF local desde su visor. Selecciona el archivo PDF con el importador existente." };
+      return { kind: "local-pdf", extension, message: "PDF local detectado. Se comprobará el permiso de acceso a archivos antes de intentar leer sus bytes." };
     }
     if (TEXT_EXTENSIONS.has(extension)) return { kind: "local-text-document", extension };
     return { kind: "local-document", extension, message: "No se puede recuperar este archivo local desde la pestaña. Selecciónalo con el importador existente." };
@@ -283,11 +283,47 @@ function errorResult(kind, message, tab = null, type = "") {
   return { ok: false, state: kind, type, message, title: tab?.title || "", sourceUrl: safeSourceUrl(tab?.url || "") };
 }
 
+function normalizedFileUrl(value) {
+  const url = new URL(value);
+  if (url.protocol !== "file:") throw new Error("La respuesta no es un archivo local.");
+  url.hash = "";
+  return url.href;
+}
+
+export function localPdfRecoveryActions(result) {
+  const state = result?.state || "";
+  const localPdf = result?.type === "local-pdf" || ["local-pdf-target", "local-pdf-unavailable", "file-access-disabled", "file-access-unknown"].includes(state);
+  const pdf = localPdf || result?.type === "pdf" || state === "file-unavailable" || /\.pdf(?:$|\s)/i.test(result?.title || "");
+  return {
+    selectPdf: Boolean(pdf),
+    previewSelectedPdf: Boolean(localPdf),
+    retryFileAccess: state === "file-access-disabled"
+  };
+}
+
+export function createLocalPdfPreview(file, text, maxCharacters = MAX_IMPORT_CHARACTERS) {
+  const content = String(text || "");
+  const limit = Math.max(1, Number(maxCharacters) || MAX_IMPORT_CHARACTERS);
+  const limited = content.slice(0, limit);
+  return {
+    ok: true,
+    state: "complete",
+    title: String(file?.name || "PDF local"),
+    sourceUrl: "",
+    type: "local-pdf",
+    text: limited,
+    characters: limited.length,
+    truncated: content.length > limit,
+    message: "PDF leído localmente desde el archivo seleccionado. Revisa el texto y elige Reemplazar o Añadir para aplicarlo."
+  };
+}
+
 export async function importCurrentTab({
   tabsApi = globalThis.chrome?.tabs,
   scriptingApi = globalThis.chrome?.scripting,
   fetchImpl = globalThis.fetch,
   targetTab = null,
+  fileAccessAllowed = false,
   selectionOnly = false,
   maxCharacters = MAX_IMPORT_CHARACTERS,
   maxBytes = MAX_IMPORT_BYTES,
@@ -295,7 +331,7 @@ export async function importCurrentTab({
   extractPdf = null
 } = {}) {
   onStatus({ state: "detecting", message: "Detectando contenido de la pestaña activa…" });
-  if (!tabsApi?.query || !scriptingApi?.executeScript) {
+  if (!targetTab && !tabsApi?.query) {
     return errorResult("permission-required", "La API de pestañas no está disponible. Abre esta extensión en Edge y vuelve a intentarlo.");
   }
 
@@ -309,24 +345,45 @@ export async function importCurrentTab({
   if (!tab?.id) return errorResult("restricted", "No hay una pestaña activa que se pueda importar.", tab);
 
   const classification = classifyTab(tab);
-  if (["restricted", "permission-required", "local-pdf", "local-document"].includes(classification.kind)) {
+  if (["restricted", "permission-required", "local-document"].includes(classification.kind)) {
     return errorResult(classification.kind, classification.message, tab, classification.kind);
   }
-  if (selectionOnly && classification.kind === "pdf") {
+  const localPdf = classification.kind === "local-pdf";
+  if (localPdf && fileAccessAllowed !== true) {
+    const state = fileAccessAllowed === false ? "file-access-disabled" : "file-access-unknown";
+    return errorResult(state, fileAccessAllowed === false
+      ? "El permiso para leer archivos locales no está activo. En edge://extensions abre Detalles de la extensión y activa ‘Permitir el acceso a direcciones URL de archivo’; luego vuelve a comprobarlo o selecciona el PDF manualmente."
+      : "No se pudo confirmar el permiso para leer archivos locales. Vuelve a comprobarlo o selecciona el PDF manualmente.", tab, "local-pdf");
+  }
+  if (selectionOnly && (classification.kind === "pdf" || localPdf)) {
     return errorResult("selection-unavailable", "El visor PDF de Edge no expone su selección mediante scripting. Selecciona texto en una página web o abre el archivo con el selector.", tab, "pdf");
   }
-  if (classification.kind === "pdf") {
-    onStatus({ state: "extracting", message: "Documento compatible · recuperando el PDF sin cookies para extraerlo localmente…", title: tab.title || "" });
+  if (classification.kind === "pdf" || localPdf) {
+    onStatus({
+      state: localPdf ? "retrieving-local-pdf" : "retrieving-pdf",
+      message: localPdf ? "Intentando recuperar el PDF local…" : "Documento compatible · recuperando el PDF sin cookies para extraerlo localmente…",
+      title: tab.title || ""
+    });
     try {
       const response = await fetchImpl(tab.url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
-      if (!response?.ok) return errorResult("file-unavailable", "No se pudo recuperar el PDF (puede requerir acceso o redirigir a otro origen). Descárgalo y selecciónalo manualmente.", tab, "pdf");
+      if (!response?.ok) return errorResult(localPdf ? "local-pdf-unavailable" : "file-unavailable", localPdf
+        ? "Edge no entregó los bytes originales del PDF desde el visor. Selecciona el archivo PDF original manualmente."
+        : "No se pudo recuperar el PDF (puede requerir acceso o redirigir a otro origen). Descárgalo y selecciónalo manualmente.", tab, localPdf ? "local-pdf" : "pdf");
       const requestedUrl = new URL(tab.url);
       const finalUrl = response.url ? new URL(response.url) : requestedUrl;
-      if (requestedUrl.origin !== finalUrl.origin) return errorResult("file-unavailable", "El PDF redirige a otro origen que no tiene permiso temporal. Descárgalo y selecciónalo manualmente.", tab, "pdf");
+      if (localPdf) {
+        if (normalizedFileUrl(finalUrl.href) !== normalizedFileUrl(requestedUrl.href)) {
+          return errorResult("local-pdf-unavailable", "El visor devolvió otra dirección en lugar del PDF original. Selecciona el archivo PDF manualmente.", tab, "local-pdf");
+        }
+      } else if (requestedUrl.origin !== finalUrl.origin) {
+        return errorResult("file-unavailable", "El PDF redirige a otro origen que no tiene permiso temporal. Descárgalo y selecciónalo manualmente.", tab, "pdf");
+      }
       const blob = await readBoundedBlob(response, maxBytes);
       const signature = await blob.slice(0, 5).text();
-      if (!signature.startsWith("%PDF-")) return errorResult("file-unavailable", "La pestaña parece un PDF, pero el servidor no entregó los bytes del archivo. Descárgalo y selecciónalo manualmente.", tab, "pdf");
-      onStatus({ state: "extracting", message: "Extrayendo texto del PDF en este dispositivo…", title: tab.title || "" });
+      if (!signature.startsWith("%PDF-")) return errorResult(localPdf ? "local-pdf-unavailable" : "file-unavailable", localPdf
+        ? "La dirección parecía un PDF, pero Edge no entregó sus bytes originales. Selecciona el archivo PDF manualmente."
+        : "La pestaña parece un PDF, pero el servidor no entregó los bytes del archivo. Descárgalo y selecciónalo manualmente.", tab, localPdf ? "local-pdf" : "pdf");
+      onStatus({ state: "extracting-pdf", message: localPdf ? "PDF recuperado · extrayendo texto en este dispositivo…" : "Extrayendo texto del PDF en este dispositivo…", title: tab.title || "" });
       const file = new File([blob], pdfName(tab, tab.url), { type: "application/pdf" });
       let extract = extractPdf;
       if (!extract) extract = (await import("./documents.js")).extractDocument;
@@ -334,15 +391,21 @@ export async function importCurrentTab({
       if (!text.trim()) return errorResult("no-text", "El PDF no contiene texto extraíble. Si es un escaneo, usa OCR fuera de la extensión y vuelve a importarlo.", tab, "pdf");
       const limited = text.slice(0, maxCharacters);
       return {
-        ok: true, state: "complete", title: tab.title || file.name, sourceUrl: safeSourceUrl(tab.url),
-        type: "pdf", text: limited, characters: limited.length, truncated: text.length > maxCharacters,
-        message: text.length > maxCharacters ? `Extracción completada; se limitaron los primeros ${maxCharacters.toLocaleString()} caracteres.` : "Extracción completada desde el PDF localmente."
+        ok: true, state: "complete", title: tab.title || file.name, sourceUrl: localPdf ? "" : safeSourceUrl(tab.url),
+        type: localPdf ? "local-pdf" : "pdf", text: limited, characters: limited.length, truncated: text.length > maxCharacters,
+        message: text.length > maxCharacters ? `Extracción completada; se limitaron los primeros ${maxCharacters.toLocaleString()} caracteres.` : localPdf ? "PDF local recuperado y extraído en este dispositivo. Revisa el resultado antes de importarlo." : "Extracción completada desde el PDF localmente."
       };
     } catch (error) {
       const message = error?.message || "No se pudo extraer el PDF.";
       const state = /no contiene texto extraíble|escaneo/i.test(message) ? "no-text" : /25 MB/i.test(message) ? "too-large" : "file-unavailable";
-      return errorResult(state, `${message} Puedes descargarlo y seleccionar el archivo original.`, tab, "pdf");
+      return errorResult(localPdf && state === "file-unavailable" ? "local-pdf-unavailable" : state,
+        localPdf && state === "file-unavailable" ? `Edge no pudo leer los bytes de este PDF desde el visor. Selecciona el archivo PDF original manualmente. Detalle: ${message}` : `${message} Puedes descargarlo y seleccionar el archivo original.`,
+        tab, localPdf ? "local-pdf" : "pdf");
     }
+  }
+
+  if (!scriptingApi?.executeScript) {
+    return errorResult("permission-required", "La API de lectura de pestañas no está disponible. Abre esta extensión en Edge y vuelve a intentarlo.", tab);
   }
 
   const plain = classification.kind === "text-document" || classification.kind === "local-text-document";

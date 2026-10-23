@@ -8,6 +8,7 @@
   "background": { "service_worker": "background.js", "type": "module" },
   "permissions": ["storage", "sidePanel", "offscreen", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
+    "file:///*",
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",

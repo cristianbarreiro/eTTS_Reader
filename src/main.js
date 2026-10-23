@@ -9,7 +9,7 @@ import { KokoroWorkerClient } from "./tts-worker-client.js";
 const $ = (selector) => document.querySelector(selector);
 const ui = {
   text: $("#text-input"), count: $("#count"), chunks: $("#chunk-count"), file: $("#document-file"),
-  fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"),
+  fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
   library: $("#library-details"), librarySummary: $("#library-summary-count"), documentsList: $("#documents-list"),
   sessionsList: $("#sessions-list"), libraryStatus: $("#library-status"),
   importTab: $("#import-tab"), importSelection: $("#import-selection"), importStatus: $("#tab-import-status"),
@@ -46,6 +46,8 @@ let editingForked = false;
 let pendingQueueReplacement = false;
 let pendingTabImport = null;
 let tabImportBusy = false;
+let fileSelectionPurpose = "document";
+const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 const player = new ReaderClient({
   onState: (snapshot) => {
@@ -68,7 +70,7 @@ const player = new ReaderClient({
 
 function setContentBusy(busy) {
   ui.library.setAttribute("aria-busy", String(busy));
-  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.clearText, ui.importTab, ui.importSelection, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed]) {
+  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.importTab, ui.importSelection, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed]) {
     if (control) control.disabled = busy || (busy === false && tabImportBusy && [ui.importTab, ui.importSelection].includes(control));
   }
   for (const button of ui.library.querySelectorAll("button")) button.disabled = busy;
@@ -434,25 +436,39 @@ async function runTabImport(selectionOnly = false) {
   ui.importTab.disabled = true;
   ui.importSelection.disabled = true;
   ui.chooseSourceFile.hidden = true;
+  ui.retryFileAccess.hidden = true;
+  ui.chooseSourceFile.textContent = "Elegir archivo para importar";
+  ui.chooseSourceFile.dataset.previewPdf = "false";
   try {
     ui.importStatus.textContent = "Consultando la pestaña autorizada…";
     let result = await chrome.runtime.sendMessage({ target: "background", command: "extract-tab", selectionOnly });
-    if (result?.state === "pdf-target") {
-      ui.importStatus.textContent = "PDF detectado · extrayendo texto localmente…";
+    if (result?.state === "pdf-target" || result?.state === "local-pdf-target") {
+      const localPdf = result.state === "local-pdf-target";
+      ui.importStatus.textContent = localPdf ? "PDF local detectado · permiso activo; intentando recuperar el archivo…" : "PDF detectado · extrayendo texto localmente…";
       const pdfTarget = result;
       const { importCurrentTab } = await import("./tab-import.js");
-      result = await importCurrentTab({ targetTab: pdfTarget.targetTab, selectionOnly: false });
+      result = await importCurrentTab({
+        targetTab: pdfTarget.targetTab,
+        fileAccessAllowed: localPdf && pdfTarget.fileAccessAllowed === true,
+        selectionOnly: false,
+        onStatus: ({ message }) => { if (message) ui.importStatus.textContent = message; }
+      });
       if (result.ok) {
         const validation = await chrome.runtime.sendMessage({
           target: "background", command: "validate-import-target", expectedToken: pdfTarget.targetToken
         });
-        if (!validation?.ok) result = { ...validation, type: "pdf", title: pdfTarget.targetTab.title };
+        if (!validation?.ok) result = { ...validation, type: localPdf ? "local-pdf" : "pdf", title: pdfTarget.targetTab.title };
       }
     }
     if (!result.ok) {
       const details = [result.title, result.type ? tabImportTypeLabel(result.type) : "", result.sourceUrl].filter(Boolean);
       ui.importStatus.textContent = `${details.length ? `${details.join(" · ")}\n` : ""}${result.message || "No se pudo extraer el contenido."}`;
-      ui.chooseSourceFile.hidden = !(result.type === "pdf" || result.type === "local-pdf" || result.type === "local-document" || result.type === "local-text-document" || result.state === "file-unavailable" || /\.pdf(?:$|\s)/i.test(result.title || ""));
+      const { localPdfRecoveryActions } = await import("./tab-import.js");
+      const actions = localPdfRecoveryActions(result);
+      ui.chooseSourceFile.hidden = !actions.selectPdf;
+      ui.chooseSourceFile.textContent = actions.previewSelectedPdf ? "Seleccionar este PDF" : "Elegir archivo para importar";
+      ui.chooseSourceFile.dataset.previewPdf = String(actions.previewSelectedPdf);
+      ui.retryFileAccess.hidden = !actions.retryFileAccess;
       return;
     }
     showTabImportPreview(result);
@@ -477,6 +493,8 @@ function showTabImportPreview(result) {
   ui.importStatus.textContent = result.message || "Extracción completada. Revisa el resultado antes de importarlo.";
   ui.importPreview.hidden = false;
   ui.chooseSourceFile.hidden = true;
+  ui.retryFileAccess.hidden = true;
+  ui.chooseSourceFile.dataset.previewPdf = "false";
 }
 
 async function acceptTabImport(mode) {
@@ -912,7 +930,18 @@ ui.clearText.addEventListener("click", async () => {
 });
 
 ui.library.addEventListener("toggle", () => { if (ui.library.open) void refreshLibrary(); });
-ui.chooseSourceFile.addEventListener("click", () => ui.file.click());
+ui.drop.addEventListener("click", (event) => {
+  if (!event.isTrusted) return;
+  fileSelectionPurpose = "document";
+  ui.file.accept = DOCUMENT_FILE_ACCEPT;
+});
+ui.chooseSourceFile.addEventListener("click", () => {
+  const previewPdf = ui.chooseSourceFile.dataset.previewPdf === "true";
+  fileSelectionPurpose = previewPdf ? "local-pdf-preview" : "document";
+  ui.file.accept = previewPdf ? ".pdf,application/pdf" : DOCUMENT_FILE_ACCEPT;
+  ui.file.click();
+});
+ui.retryFileAccess.addEventListener("click", () => { void runTabImport(false); });
 
 function handlePendingSelection(selection) {
   if (!selection?.id || selection.id === lastPendingSelectionId) return;
@@ -937,16 +966,32 @@ chrome.runtime.onMessage.addListener((message) => {
 ui.file.addEventListener("change", async () => {
   const file = ui.file.files?.[0];
   if (!file) return;
+  const selectionPurpose = fileSelectionPurpose;
+  fileSelectionPurpose = "document";
+  ui.file.accept = DOCUMENT_FILE_ACCEPT;
   if (libraryMutationBusy) { ui.file.value = ""; return; }
   libraryMutationBusy = true;
   setContentBusy(true);
   const currentReadId = ++fileReadId;
-  ui.fileStatus.textContent = `Procesando ${file.name}…`;
+  ui.fileStatus.textContent = selectionPurpose === "local-pdf-preview" ? `Leyendo ${file.name} para la vista previa…` : `Procesando ${file.name}…`;
   try {
+    if (selectionPurpose === "local-pdf-preview" && !/\.pdf$/i.test(file.name)) {
+      throw new Error("Selecciona el archivo PDF original para obtener una vista previa.");
+    }
     const { extractDocument } = await import("./documents.js");
     const text = await extractDocument(file);
     if (currentReadId !== fileReadId) return;
-    if (!text.trim()) throw new Error("El documento está vacío o no contiene texto.");
+    if (!text.trim()) {
+      throw new Error(selectionPurpose === "local-pdf-preview"
+        ? "El PDF no contiene texto extraíble. Si es un escaneo, esta extensión no incluye OCR."
+        : "El documento está vacío o no contiene texto.");
+    }
+    if (selectionPurpose === "local-pdf-preview") {
+      const { createLocalPdfPreview } = await import("./tab-import.js");
+      showTabImportPreview(createLocalPdfPreview(file, text, Number(ui.text.maxLength) || 200_000));
+      ui.fileStatus.textContent = `${file.name} · texto extraído localmente · pendiente de confirmación.`;
+      return;
+    }
     await flushPersistence();
     await suspendCurrentReadForSwitch();
     selectionEpoch++;
@@ -966,7 +1011,11 @@ ui.file.addEventListener("change", async () => {
     if (ui.library.open) await refreshLibrary();
     await refreshStorageUsage();
   } catch (error) {
-    if (currentReadId === fileReadId) ui.fileStatus.textContent = error.message || "No se pudo leer el archivo.";
+    if (currentReadId === fileReadId) {
+      const message = error.message || "No se pudo leer el archivo.";
+      ui.fileStatus.textContent = message;
+      if (selectionPurpose === "local-pdf-preview") ui.importStatus.textContent = `${message} El editor y la sesión actual no cambiaron.`;
+    }
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
@@ -997,6 +1046,8 @@ for (const eventName of ["dragleave", "drop"]) ui.drop.addEventListener(eventNam
 ui.drop.addEventListener("drop", (event) => {
   const file = event.dataTransfer?.files?.[0];
   if (!file) return;
+  fileSelectionPurpose = "document";
+  ui.file.accept = DOCUMENT_FILE_ACCEPT;
   const transfer = new DataTransfer();
   transfer.items.add(file);
   ui.file.files = transfer.files;

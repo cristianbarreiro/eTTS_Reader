@@ -89,6 +89,11 @@ async function clearImportTarget(tabId = null) {
   try { await chrome.storage.session.remove(IMPORT_TARGET_KEY); } catch { /* The target is still cleared in memory. */ }
 }
 
+async function isFileSchemeAccessAllowed() {
+  if (typeof chrome.extension?.isAllowedFileSchemeAccess !== "function") return null;
+  try { return await chrome.extension.isAllowedFileSchemeAccess(); } catch { return null; }
+}
+
 function openPanelForTab(tab, selectionText = "", captureSelection = false) {
   const target = captureTab(tab);
   if (!target) return;
@@ -134,14 +139,17 @@ async function validateImportTarget() {
   if (!tab.url) {
     const title = tab?.title || target.title;
     const looksLikePdf = /\.pdf(?:$|\s)/i.test(title || "");
+    const fileAccess = looksLikePdf ? await isFileSchemeAccessAllowed() : null;
     return {
       ok: false,
-      state: looksLikePdf ? "local-pdf" : "permission-required",
+      state: !looksLikePdf ? "permission-required" : fileAccess === false ? "file-access-disabled" : "local-pdf-unavailable",
       type: looksLikePdf ? "local-pdf" : "permission-required",
       title,
-      message: looksLikePdf
-        ? "El visor PDF de Edge no expuso una dirección o bytes que la extensión pueda leer. Usa ‘Elegir archivo para importar’ y selecciona el PDF original."
-        : "Edge no expuso la dirección de la pestaña autorizada. Vuelve a esa pestaña y pulsa el icono de la extensión para conceder acceso temporal."
+      message: !looksLikePdf
+        ? "Edge no expuso la dirección de la pestaña autorizada. Vuelve a esa pestaña y pulsa el icono de la extensión para conceder acceso temporal."
+        : fileAccess === false
+          ? "El acceso a archivos locales está desactivado. En edge://extensions abre Detalles de esta extensión y activa ‘Permitir el acceso a direcciones URL de archivo’; después vuelve a comprobarlo o selecciona el PDF manualmente."
+          : "El visor PDF de Edge no expuso la dirección o los bytes originales que la extensión necesita. Selecciona el PDF original manualmente."
     };
   }
   if (target.url && tab.url !== target.url) {
@@ -162,7 +170,30 @@ async function extractAuthorizedTab(selectionOnly) {
   const { target, tab } = validated;
   const classification = classifyTab(tab);
   if (classification.kind === "pdf") return { ok: true, state: "pdf-target", targetTab: { id: tab.id, url: tab.url, title: tab.title || "PDF" }, targetToken: target.token, type: "pdf" };
-  if (["restricted", "permission-required", "local-pdf", "local-document"].includes(classification.kind)) {
+  if (classification.kind === "local-pdf") {
+    if (selectionOnly) {
+      return { ok: false, state: "selection-unavailable", type: "local-pdf", title: tab.title || target.title, message: "El visor PDF de Edge no expone selecciones mediante scripting. Usa Importar pestaña actual o selecciona el archivo original." };
+    }
+    const fileAccess = await isFileSchemeAccessAllowed();
+    if (fileAccess === false) {
+      return {
+        ok: false, state: "file-access-disabled", type: "local-pdf", title: tab.title || target.title,
+        message: "El acceso a archivos locales está desactivado. En edge://extensions abre Detalles de esta extensión y activa ‘Permitir el acceso a direcciones URL de archivo’; luego pulsa ‘Volver a comprobar el permiso’. También puedes seleccionar el PDF manualmente."
+      };
+    }
+    if (fileAccess !== true) {
+      return {
+        ok: false, state: "file-access-unknown", type: "local-pdf", title: tab.title || target.title,
+        message: "Edge no pudo confirmar el permiso para leer archivos locales. Puedes volver a comprobar el permiso o seleccionar el PDF manualmente."
+      };
+    }
+    return {
+      ok: true, state: "local-pdf-target",
+      targetTab: { id: tab.id, url: tab.url, title: tab.title || "PDF local" },
+      targetToken: target.token, type: "local-pdf", fileAccessAllowed: true
+    };
+  }
+  if (["restricted", "permission-required", "local-document"].includes(classification.kind)) {
     return { ok: false, state: classification.kind, type: classification.kind, title: tab.title || target.title, sourceUrl: safeSourceUrl(tab.url), message: classification.message };
   }
 

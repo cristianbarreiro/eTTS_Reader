@@ -20,7 +20,10 @@
         <input id="document-file" type="file" accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
       </label>
       <p id="file-status" class="hint" role="status">Los documentos se guardan en este dispositivo.</p>
-      <button id="choose-source-file" class="text-button file-fallback" hidden>Elegir archivo para importar</button>
+      <div class="file-fallback-actions">
+        <button id="choose-source-file" class="text-button file-fallback" hidden>Elegir archivo para importar</button>
+        <button id="retry-file-access" class="text-button file-fallback" hidden>Volver a comprobar el permiso</button>
+      </div>
       <div class="tab-import" aria-labelledby="tab-import-heading">
         <div class="tab-import-heading"><strong id="tab-import-heading">Importar desde Edge</strong><span>Se procesa localmente</span></div>
         <div class="tab-import-actions">
