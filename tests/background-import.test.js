@@ -9,9 +9,16 @@ function event() {
   };
 }
 
-async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" }, scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false }, fileAccessAllowed = false } = {}) {
+async function loadBackground({
+  initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" },
+  scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false },
+  scriptResponse = null, fileAccessAllowed = false, tabsPermissionGranted = false,
+  hostPermissions = [], permissionDecision = true
+} = {}) {
   const values = new Map();
-  const calls = { panel: [], scripts: [], contextMenu: [], messages: [] };
+  const localValues = new Map();
+  const grantedHosts = new Set(hostPermissions);
+  const calls = { panel: [], scripts: [], contextMenu: [], messages: [], permissionRequests: [] };
   const api = {
     runtime: {
       getManifest: () => ({ side_panel: { default_path: "sidepanel.html" } }),
@@ -20,23 +27,44 @@ async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https:/
       async sendMessage(message) { calls.messages.push(message); return { ok: true }; }
     },
     extension: { async isAllowedFileSchemeAccess() { return fileAccessAllowed; } },
-    storage: { session: {
-      async set(record) { for (const [key, value] of Object.entries(record)) values.set(key, value); },
-      async get(key) { return { [key]: values.get(key) }; },
-      async remove(key) { values.delete(key); }
-    } },
+    storage: {
+      session: {
+        async set(record) { for (const [key, value] of Object.entries(record)) values.set(key, value); },
+        async get(key) { return { [key]: values.get(key) }; },
+        async remove(key) { values.delete(key); }
+      },
+      local: {
+        async set(record) { for (const [key, value] of Object.entries(record)) localValues.set(key, value); },
+        async get(key) { return { [key]: localValues.get(key) }; }
+      }
+    },
     sidePanel: {
       async open(options) { calls.panel.push(options); },
       async setPanelBehavior() {}
     },
     tabs: {
-      onUpdated: event(), onRemoved: event(), activeTab: initialTab,
-      async query() { return [this.activeTab]; },
+      onActivated: event(), onUpdated: event(), onRemoved: event(), activeTab: initialTab,
+      async query(query = {}) { return this.activeTab && (!Number.isInteger(query.windowId) || this.activeTab.windowId === query.windowId) ? [this.activeTab] : []; },
       async get(id) { return this.activeTab?.id === id ? this.activeTab : null; }
+    },
+    windows: { WINDOW_ID_NONE: -1, onFocusChanged: event() },
+    permissions: {
+      onAdded: event(), onRemoved: event(),
+      async contains(details) {
+        if (details.permissions?.includes("tabs") && !tabsPermissionGranted) return false;
+        return (details.origins || []).every((origin) => grantedHosts.has(origin));
+      },
+      async request(details) {
+        calls.permissionRequests.push(details);
+        if (!permissionDecision) return false;
+        if (details.permissions?.includes("tabs")) tabsPermissionGranted = true;
+        for (const origin of details.origins || []) grantedHosts.add(origin);
+        return true;
+      }
     },
     action: { onClicked: event() },
     contextMenus: { onClicked: event(), async removeAll() {}, create(item) { calls.contextMenu.push(item); } },
-    scripting: { async executeScript(options) { calls.scripts.push(options); return [{ result: scriptResult }]; } },
+    scripting: { async executeScript(options) { calls.scripts.push(options); return scriptResponse ? scriptResponse(options) : [{ result: scriptResult }]; } },
     offscreen: { async hasDocument() { return true; }, async closeDocument() {} }
   };
   const previousChrome = globalThis.chrome;
@@ -48,7 +76,7 @@ async function loadBackground({ initialTab = { id: 7, windowId: 2, url: "https:/
     if (handled !== true) resolve(undefined);
   });
   return {
-    api, calls, values, send,
+    api, calls, values, localValues, send,
     restore() { globalThis.chrome = previousChrome; }
   };
 }
@@ -164,6 +192,117 @@ test("context-menu selection is captured before focus changes and delivered as s
     const result = await harness.send({ target: "background", command: "take-pending-selection" });
     assert.equal(result.selection.text, "Only selected words");
     assert.equal(result.selection.sourceUrl, "https://example.test/article");
+  } finally { harness.restore(); }
+});
+
+test("optional follow mode reports the newly active tab and extraction uses that tab id", async () => {
+  const harness = await loadBackground({
+    tabsPermissionGranted: true,
+    hostPermissions: ["https://example.test/*", "https://other.test/*"]
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    assert.equal(enabled.ok, true);
+    assert.equal(enabled.context.tabId, 7);
+
+    const tabB = { id: 8, windowId: 2, url: "https://other.test/story", title: "Other page", active: true };
+    harness.api.tabs.activeTab = tabB;
+    harness.api.tabs.onActivated.fire({ tabId: tabB.id, windowId: tabB.windowId });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(harness.calls.scripts.length, 0, "tab changes must not start extraction");
+    assert.equal(harness.calls.permissionRequests.length, 0, "tab changes must not request permissions");
+    const latest = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(latest.context.tabId, tabB.id);
+    assert.equal(latest.context.url, tabB.url);
+
+    const result = await harness.send({
+      target: "background", command: "extract-current-tab", context: latest.context, operationId: 19
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.operationId, 19);
+    assert.equal(harness.calls.scripts.at(-1).target.tabId, tabB.id);
+    assert.equal(harness.calls.messages.some((message) => message.target === "offscreen"), false);
+    assert.ok(harness.calls.messages.some((message) => message.type === "active-tab-context" && message.context.tabId === tabB.id));
+  } finally { harness.restore(); }
+});
+
+test("navigation changes the document token and rejects the previous document context", async () => {
+  const harness = await loadBackground({
+    tabsPermissionGranted: true,
+    hostPermissions: ["https://example.test/*"]
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const previous = enabled.context;
+    harness.api.tabs.activeTab = { ...harness.api.tabs.activeTab, url: "https://example.test/next", title: "Next page" };
+    harness.api.tabs.onUpdated.fire(7, { url: "https://example.test/next" }, harness.api.tabs.activeTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const result = await harness.send({ target: "background", command: "extract-current-tab", context: previous, operationId: 20 });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "stale-context");
+    assert.equal(harness.calls.scripts.length, 0);
+  } finally { harness.restore(); }
+});
+
+test("site access is checked before scripting and restricted browser pages remain unavailable", async () => {
+  const harness = await loadBackground({ tabsPermissionGranted: true, hostPermissions: [] });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const denied = await harness.send({ target: "background", command: "extract-current-tab", context: enabled.context, operationId: 21 });
+    assert.equal(denied.state, "site-permission-required");
+    assert.equal(denied.hostPattern, "https://example.test/*");
+    assert.equal(harness.calls.scripts.length, 0);
+    assert.equal(harness.calls.permissionRequests.length, 0, "the background must wait for an import click before requesting site access");
+
+    harness.api.tabs.activeTab = { id: 9, windowId: 2, url: "edge://settings", title: "Settings", active: true };
+    harness.api.tabs.onActivated.fire({ tabId: 9, windowId: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const restricted = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(restricted.context.state, "restricted");
+    const blocked = await harness.send({ target: "background", command: "extract-current-tab", context: restricted.context, operationId: 22 });
+    assert.equal(blocked.state, "restricted");
+    assert.equal(harness.calls.scripts.length, 0);
+  } finally { harness.restore(); }
+});
+
+test("a removed active tab resolves to the remaining tab without retaining the closed id", async () => {
+  const harness = await loadBackground({
+    tabsPermissionGranted: true,
+    hostPermissions: ["https://example.test/*", "https://other.test/*"]
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const remaining = { id: 8, windowId: 2, url: "https://other.test/", title: "Remaining", active: true };
+    harness.api.tabs.activeTab = remaining;
+    harness.api.tabs.onRemoved.fire(7, { windowId: 2, isWindowClosing: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const latest = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(latest.context.tabId, remaining.id);
+    assert.notEqual(latest.context.tabId, enabled.context.tabId);
+  } finally { harness.restore(); }
+});
+
+test("an extraction result is discarded when navigation happens while the script is running", async () => {
+  let resolveScript;
+  const scriptResponse = () => new Promise((resolve) => { resolveScript = resolve; });
+  const harness = await loadBackground({
+    tabsPermissionGranted: true,
+    hostPermissions: ["https://example.test/*"],
+    scriptResponse
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const pending = harness.send({ target: "background", command: "extract-current-tab", context: enabled.context, operationId: 23 });
+    while (!resolveScript) await new Promise((resolve) => setTimeout(resolve, 0));
+    harness.api.tabs.activeTab = { ...harness.api.tabs.activeTab, url: "https://example.test/changed" };
+    harness.api.tabs.onUpdated.fire(7, { url: "https://example.test/changed" }, harness.api.tabs.activeTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    resolveScript([{ result: { title: "Old page", text: "must be discarded" } }]);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "stale-context");
+    assert.equal(result.text, undefined);
   } finally { harness.restore(); }
 });
 

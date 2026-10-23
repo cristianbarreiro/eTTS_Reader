@@ -24,6 +24,15 @@
         <button id="choose-source-file" class="text-button file-fallback" hidden>Elegir archivo para importar</button>
         <button id="retry-file-access" class="text-button file-fallback" hidden>Volver a comprobar el permiso</button>
       </div>
+      <section class="active-tab-card" aria-labelledby="active-tab-heading">
+        <div class="active-tab-header">
+          <strong id="active-tab-heading">Pestaña actual</strong>
+          <label class="follow-tab-toggle"><input id="follow-active-tab" type="checkbox"> Seguir pestaña activa</label>
+        </div>
+        <p class="hint active-tab-explanation">Usa el título y la dirección para identificar el origen. El contenido solo se lee al pulsar Importar.</p>
+        <p id="active-tab-title" class="active-tab-title">Abre el lector desde la pestaña que quieras importar.</p>
+        <p id="active-tab-status" class="hint" role="status" aria-live="polite">Esperando selección</p>
+      </section>
       <div class="tab-import" aria-labelledby="tab-import-heading">
         <div class="tab-import-heading"><strong id="tab-import-heading">Importar desde Edge</strong><span>Se procesa localmente</span></div>
         <div class="tab-import-actions">

@@ -63,6 +63,12 @@ textarea { display: block; width: 100%; min-height: 112px; max-height: 180px; re
 .storage-row .hint { flex: 1 1 100%; }
 .file-fallback { margin: 0 0 8px; }
 .file-fallback-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.active-tab-card { padding: 9px 10px; margin: 8px 0 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.active-tab-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 11px; }
+.follow-tab-toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; cursor: pointer; }
+.follow-tab-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.active-tab-title { margin: 7px 0 3px; overflow-wrap: anywhere; color: var(--text); font-size: 11px; font-weight: 650; line-height: 1.35; }
+.active-tab-card .hint { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 10px; }
 .library-card { padding: 0; overflow: hidden; }
 .library-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 15px; color: var(--text); font-size: 14px; font-weight: 700; cursor: pointer; list-style: none; }
 .library-card > summary::-webkit-details-marker { display: none; }

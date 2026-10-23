@@ -16,6 +16,8 @@ test("source and production manifests use one Side Panel, an event worker, and m
     assert.equal(manifest.action.default_popup, undefined);
     assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "sidePanel", "offscreen", "activeTab", "scripting", "contextMenus"]));
     assert.ok(!manifest.permissions.includes("tabs"));
+    assert.deepEqual(manifest.optional_permissions, ["tabs"]);
+    assert.deepEqual(new Set(manifest.optional_host_permissions), new Set(["http://*/*", "https://*/*"]));
     assert.ok(!manifest.host_permissions.includes("<all_urls>"));
     assert.ok(manifest.host_permissions.includes("file:///*"));
     assert.ok(!manifest.host_permissions.some((permission) => /^https?:\/\/\*\//.test(permission)));

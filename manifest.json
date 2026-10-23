@@ -7,6 +7,8 @@
   "side_panel": { "default_path": "dist/sidepanel.html" },
   "background": { "service_worker": "dist/background.js", "type": "module" },
   "permissions": ["storage", "sidePanel", "offscreen", "activeTab", "scripting", "contextMenus"],
+  "optional_permissions": ["tabs"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "host_permissions": [
     "file:///*",
     "https://huggingface.co/*",

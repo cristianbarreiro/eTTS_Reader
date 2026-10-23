@@ -3,11 +3,19 @@ import { classifyTab, extractReadablePage, safeSourceUrl } from "./tab-import.js
 const PANEL_PATH = chrome.runtime.getManifest().side_panel?.default_path || "sidepanel.html";
 const OFFSCREEN_PATH = `${PANEL_PATH.slice(0, PANEL_PATH.lastIndexOf("/") + 1)}offscreen.html`;
 const IMPORT_TARGET_KEY = "tabImportTarget";
+const ACTIVE_TAB_CONTEXT_KEY = "activeTabContext";
+const FOLLOW_ACTIVE_TAB_KEY = "followActiveTab";
 const PENDING_SELECTION_KEY = "pendingTabSelection";
 const SELECTION_MENU_ID = "send-selection-to-local-reader";
 let creatingOffscreen = null;
 let creatingContextMenu = null;
 let inMemoryImportTarget = null;
+let activeTabContext = null;
+let followActiveTab = false;
+let followWindowId = null;
+let contextRevision = 0;
+let contextRequestSequence = 0;
+const documentTokens = new Map();
 
 async function hasOffscreenDocument() {
   if (chrome.runtime.getContexts) {
@@ -94,12 +102,176 @@ async function isFileSchemeAccessAllowed() {
   try { return await chrome.extension.isAllowedFileSchemeAccess(); } catch { return null; }
 }
 
+function makeToken() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+}
+
+function hostPermissionPattern(value) {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return "";
+    return `${url.protocol}//${url.hostname}/*`;
+  } catch { return ""; }
+}
+
+async function hasPermission(details) {
+  if (typeof chrome.permissions?.contains !== "function") return false;
+  try { return await chrome.permissions.contains(details); } catch { return false; }
+}
+
+async function savedTabForId(tabId) {
+  const target = await readImportTarget();
+  return target?.tabId === tabId ? target : null;
+}
+
+async function describeActiveTab(tab, { forceNewDocument = false } = {}) {
+  if (!tab?.id) {
+    return { state: "waiting", title: "", location: "", contentType: "", accessState: "Esperando selección", availability: "No hay una pestaña activa disponible.", importable: false, tabsPermissionGranted: await hasTabsPermission() };
+  }
+  const tabsPermissionGranted = await hasTabsPermission();
+  const savedTarget = await savedTabForId(tab.id);
+  const url = typeof tab.url === "string" && tab.url ? tab.url : savedTarget?.url || "";
+  const title = typeof tab.title === "string" && tab.title ? tab.title : savedTarget?.title || "";
+  if (!url) {
+    return {
+      tabId: tab.id, windowId: tab.windowId ?? savedTarget?.windowId ?? null,
+      url: "", title, documentToken: "", state: "tabs-permission-required",
+      location: "Dirección oculta por Edge", contentType: "Pestaña actual",
+      accessState: "Permiso de seguimiento requerido",
+      availability: "Activa «Seguir pestaña activa» o abre el lector desde esta pestaña.", importable: false,
+      sitePermissionGranted: false, tabsPermissionGranted
+    };
+  }
+
+  const previousToken = documentTokens.get(tab.id);
+  const previousContext = activeTabContext?.tabId === tab.id ? activeTabContext : null;
+  const sameDocument = !forceNewDocument && ((previousToken?.url === url && previousToken?.token) || (previousContext?.url === url && previousContext?.documentToken));
+  const documentToken = sameDocument ? (previousToken?.token || previousContext.documentToken) : makeToken();
+  documentTokens.set(tab.id, { url, token: documentToken });
+
+  const parsed = (() => { try { return new URL(url); } catch { return null; } })();
+  const classification = classifyTab({ ...tab, url, title });
+  const base = {
+    tabId: tab.id, windowId: tab.windowId ?? savedTarget?.windowId ?? null,
+    url, title: title || "Pestaña sin título", documentToken,
+    tabsPermissionGranted,
+    location: parsed?.protocol === "http:" || parsed?.protocol === "https:" ? parsed.host : parsed?.protocol === "file:" ? "Archivo local" : parsed?.protocol?.replace(":", "") || "",
+    hostPattern: hostPermissionPattern(url),
+    contentType: "Página web", accessState: "", availability: "", importable: false
+  };
+
+  if (classification.kind === "restricted") {
+    return { ...base, state: "restricted", contentType: "Página interna", accessState: "Pestaña restringida", availability: "Usa el selector de archivos o pega el texto.", importable: false, sitePermissionGranted: false };
+  }
+  if (classification.kind === "local-pdf") {
+    const allowed = await isFileSchemeAccessAllowed();
+    return { ...base, state: "local-pdf", location: "PDF local", contentType: "PDF detectado", accessState: allowed ? "Acceso a archivos locales concedido" : allowed === false ? "Permiso de archivo requerido" : "No se pudo comprobar el permiso", availability: allowed ? "Se comprobará el acceso al importar." : "Selecciona el PDF o habilita el acceso a archivos.", importable: allowed === true, sitePermissionGranted: false };
+  }
+  if (classification.kind === "pdf") base.contentType = "PDF detectado";
+  else if (classification.kind === "google-docs") base.contentType = "Google Docs";
+  else if (classification.kind === "text-document") base.contentType = "Documento de texto";
+  else if (classification.kind === "local-text-document") {
+    return { ...base, state: "local-document", contentType: "Archivo local", accessState: "Acceso del visor no confirmado", availability: "Usa el selector de archivos.", importable: false, sitePermissionGranted: false };
+  }
+
+  const pattern = hostPermissionPattern(url);
+  const granted = pattern ? await hasPermission({ origins: [pattern] }) : false;
+  return {
+    ...base, state: classification.kind === "pdf" ? "pdf" : classification.kind,
+    accessState: granted ? "Permiso de sitio concedido" : "Permiso de sitio requerido",
+    availability: granted ? "Listo para importar" : "Se solicitará autorización al pulsar Importar pestaña actual.",
+    importable: granted, sitePermissionGranted: granted
+  };
+}
+
+async function commitActiveTabContext(tab, options, requestSequence) {
+  const description = await describeActiveTab(tab, options);
+  if (requestSequence !== contextRequestSequence) return activeTabContext;
+  const context = { ...description, following: followActiveTab, revision: ++contextRevision, updatedAt: Date.now() };
+  activeTabContext = context;
+  try { await chrome.storage.session.set({ [ACTIVE_TAB_CONTEXT_KEY]: context }); } catch { /* The live worker keeps the current context. */ }
+  void chrome.runtime.sendMessage({ target: "panel", type: "active-tab-context", context }).catch(() => {});
+  return context;
+}
+
+async function publishActiveTabContext(tab, options = {}) {
+  const requestSequence = ++contextRequestSequence;
+  return commitActiveTabContext(tab, options, requestSequence);
+}
+
+async function currentActiveTab(windowId = null) {
+  let active;
+  try {
+    const query = windowId === null ? { active: true, lastFocusedWindow: true } : { active: true, windowId };
+    [active] = await chrome.tabs.query(query);
+    if (!active?.id) return null;
+    const full = await chrome.tabs.get(active.id).catch(() => null);
+    const visible = full || active;
+    if (!visible.url || !visible.title) {
+      const savedTarget = await savedTabForId(active.id);
+      return { ...visible, url: visible.url || savedTarget?.url || "", title: visible.title || savedTarget?.title || "", windowId: visible.windowId ?? savedTarget?.windowId };
+    }
+    return visible;
+  } catch { return null; }
+}
+
+async function refreshActiveTabContext({ windowId = null, forceNewDocument = false } = {}) {
+  const requestSequence = ++contextRequestSequence;
+  const tab = await currentActiveTab(windowId);
+  return commitActiveTabContext(tab, { forceNewDocument }, requestSequence);
+}
+
+async function refreshContextForTab(tabId, windowId, { forceNewDocument = false } = {}) {
+  const requestSequence = ++contextRequestSequence;
+  let tab = null;
+  try { tab = await chrome.tabs.get(tabId); } catch { /* The tab may have closed before the event was handled. */ }
+  if (tab?.windowId !== undefined && windowId !== undefined && tab.windowId !== windowId) return activeTabContext;
+  return commitActiveTabContext(tab, { forceNewDocument }, requestSequence);
+}
+
+async function hasTabsPermission() {
+  return hasPermission({ permissions: ["tabs"] });
+}
+
+async function setFollowActiveTab(enabled, preferredWindowId = null) {
+  if (!enabled) {
+    followActiveTab = false;
+    followWindowId = null;
+    try { await chrome.storage.local.set({ [FOLLOW_ACTIVE_TAB_KEY]: false }); } catch { /* Session storage state is enough until the worker stops. */ }
+    const context = await refreshActiveTabContext();
+    return { ok: true, following: false, context };
+  }
+  if (!(await hasTabsPermission())) return { ok: false, state: "tabs-permission-required", following: false };
+  followActiveTab = true;
+  const context = await refreshActiveTabContext({ windowId: Number.isInteger(preferredWindowId) ? preferredWindowId : null });
+  if (!context?.tabId) {
+    followActiveTab = false;
+    followWindowId = null;
+    return { ok: false, state: "no-active-tab", following: false };
+  }
+  followWindowId = Number.isInteger(context.windowId) ? context.windowId : null;
+  try { await chrome.storage.local.set({ [FOLLOW_ACTIVE_TAB_KEY]: true }); } catch { /* The live worker keeps the setting. */ }
+  return { ok: true, following: true, context };
+}
+
+async function restoreFollowState() {
+  try {
+    const stored = await chrome.storage.local.get(FOLLOW_ACTIVE_TAB_KEY);
+    if (!stored[FOLLOW_ACTIVE_TAB_KEY] || !(await hasTabsPermission())) return;
+    followActiveTab = true;
+    const context = await refreshActiveTabContext();
+    followWindowId = Number.isInteger(context?.windowId) ? context.windowId : null;
+  } catch { /* Following can be enabled again from the Side Panel. */ }
+}
+
 function openPanelForTab(tab, selectionText = "", captureSelection = false) {
   const target = captureTab(tab);
   if (!target) return;
 
   // Call openPanel synchronously from the user gesture so Edge retains that gesture.
+  if (followActiveTab && Number.isInteger(target.windowId)) followWindowId = target.windowId;
   void chrome.sidePanel.open({ tabId: target.tabId }).catch(() => {});
+  void publishActiveTabContext(tab);
   void saveImportTarget(target);
   if (captureSelection) {
     const selection = {
@@ -162,6 +334,142 @@ async function validateImportTarget() {
     await saveImportTarget(target);
   }
   return { ok: true, target, tab };
+}
+
+function contextIdentity(context) {
+  return {
+    tabId: context?.tabId,
+    windowId: context?.windowId ?? null,
+    url: context?.url || "",
+    documentToken: context?.documentToken || ""
+  };
+}
+
+async function validateCurrentTabContext(expectedContext) {
+  if (!expectedContext?.documentToken || !Number.isInteger(expectedContext.tabId) || !expectedContext.url) {
+    return { ok: false, state: "context-unavailable", message: "No se conoce una pestaña actual segura. Activa «Seguir pestaña activa» o abre el lector desde la pestaña que quieres importar." };
+  }
+  const windowId = Number.isInteger(expectedContext.windowId) ? expectedContext.windowId : null;
+  const active = await currentActiveTab(windowId);
+  if (!active?.id) return { ok: false, state: "no-active-tab", message: "No hay una pestaña activa disponible. Vuelve a intentarlo desde la página deseada." };
+  if (active.id !== expectedContext.tabId) {
+    return { ok: false, state: "stale-context", message: "La pestaña activa cambió durante la operación. No se aplicó el resultado; vuelve a intentarlo." };
+  }
+
+  const latest = await refreshActiveTabContext({ windowId });
+  if (!latest?.tabId || latest.tabId !== expectedContext.tabId) {
+    return { ok: false, state: "stale-context", message: "La pestaña activa cambió durante la operación. No se aplicó el resultado; vuelve a intentarlo." };
+  }
+  if (!latest.url) {
+    return { ok: false, state: "tabs-permission-required", context: latest, message: "Edge no expuso la dirección de la pestaña. Activa «Seguir pestaña activa» o vuelve a abrir el lector desde esa pestaña." };
+  }
+  if (latest.url !== expectedContext.url || latest.documentToken !== expectedContext.documentToken) {
+    return { ok: false, state: "stale-context", context: latest, message: "La pestaña navegó a otro documento durante la operación. No se aplicó el resultado; vuelve a intentarlo." };
+  }
+  const tab = await chrome.tabs.get(latest.tabId).catch(() => null);
+  if (!tab) return { ok: false, state: "stale-context", message: "La pestaña se cerró durante la operación. No se aplicó el resultado." };
+  const url = typeof tab.url === "string" && tab.url ? tab.url : latest.url;
+  if (url !== latest.url) return { ok: false, state: "stale-context", context: latest, message: "La dirección de la pestaña cambió durante la operación. No se aplicó el resultado." };
+  return { ok: true, context: latest, tab: { ...tab, url, title: tab.title || latest.title } };
+}
+
+async function extractCurrentTab(selectionOnly, expectedContext, operationId) {
+  const validated = await validateCurrentTabContext(expectedContext);
+  if (!validated.ok) return { ...validated, operationId };
+  const { tab, context } = validated;
+  const classification = classifyTab({ ...tab, url: context.url, title: context.title || tab.title });
+  if (classification.kind === "restricted") {
+    return { ok: false, state: "restricted", type: "restricted", title: context.title, operationId, message: "Edge restringe esta página. Usa el selector de archivos o pega el texto en el editor." };
+  }
+  if (classification.kind === "local-text-document") {
+    return { ok: false, state: "local-document", type: "local-document", title: context.title, operationId, message: "Edge no permite extraer este archivo local desde el visor. Usa el selector de archivos." };
+  }
+  if (classification.kind === "permission-required") {
+    return { ok: false, state: "tabs-permission-required", type: "permission-required", title: context.title, operationId, message: "Edge no expuso la dirección de esta pestaña. Activa «Seguir pestaña activa» o vuelve a abrir el lector desde ella." };
+  }
+  if (classification.kind === "local-pdf") {
+    if (selectionOnly) {
+      return { ok: false, state: "selection-unavailable", type: "local-pdf", title: context.title, operationId, message: "El visor PDF de Edge no expone selecciones mediante scripting. Usa Importar pestaña actual o selecciona el PDF original." };
+    }
+    const fileAccessAllowed = await isFileSchemeAccessAllowed();
+    if (fileAccessAllowed !== true) {
+      return {
+        ok: false, state: fileAccessAllowed === false ? "file-access-disabled" : "file-access-unknown",
+        type: "local-pdf", title: context.title, operationId,
+        message: fileAccessAllowed === false
+          ? "Activa «Permitir el acceso a direcciones URL de archivo» en los detalles de la extensión o selecciona el PDF original manualmente."
+          : "Edge no pudo confirmar el acceso al PDF local. Selecciona el PDF original manualmente."
+      };
+    }
+    return {
+      ok: true, state: "local-pdf-target", targetTab: { id: tab.id, url: context.url, title: context.title || "PDF local" },
+      targetToken: context.documentToken, documentContext: contextIdentity(context), fileAccessAllowed: true,
+      type: "local-pdf", operationId
+    };
+  }
+
+  const hostPattern = hostPermissionPattern(context.url);
+  if (hostPattern && !(await hasPermission({ origins: [hostPattern] }))) {
+    return {
+      ok: false, state: "site-permission-required", type: classification.kind,
+      title: context.title, hostPattern, operationId,
+      message: "Se necesita permiso para leer esta página. Autorízalo desde el aviso de Edge y vuelve a intentarlo."
+    };
+  }
+  if (classification.kind === "pdf") {
+    return {
+      ok: true, state: "pdf-target", targetTab: { id: tab.id, url: context.url, title: context.title || "PDF" },
+      targetToken: context.documentToken, documentContext: contextIdentity(context), type: "pdf", operationId
+    };
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: context.tabId, frameIds: [0] },
+      func: extractReadablePage,
+      args: [{ selectionOnly, maxCharacters: 200_000 }]
+    });
+    const stillCurrent = await validateCurrentTabContext(expectedContext);
+    if (!stillCurrent.ok) return { ...stillCurrent, operationId };
+    const page = results?.[0]?.result;
+    if (!page || typeof page.text !== "string") {
+      return { ok: false, state: "no-text", type: classification.kind, title: context.title, operationId, message: "La pestaña no devolvió texto accesible. Puedes pegarlo o cargar el documento con el selector." };
+    }
+    const text = page.text.replace(/\u0000/g, "");
+    if (!text.trim()) {
+      const state = selectionOnly ? "no-selection" : "no-text";
+      const message = selectionOnly
+        ? "No hay texto seleccionado disponible. Selecciona texto en la página o usa el menú contextual «Enviar selección al lector local»."
+        : page.type === "google-docs"
+          ? "Google Docs no expuso texto accesible en esta vista. Prueba Importar selección, copia y pega el texto o descarga DOCX/PDF."
+          : "No se encontró texto accesible. Usa el archivo original o pega el texto en el editor.";
+      return { ok: false, state, type: page.type || classification.kind, title: page.title || context.title, operationId, message };
+    }
+    const limited = text.slice(0, 200_000);
+    return {
+      ok: true, state: "complete", title: page.title || context.title || "Pestaña actual",
+      sourceUrl: safeSourceUrl(context.url), type: page.type || classification.kind,
+      coverage: page.coverage || "page-text", visiblePageCount: Number(page.visiblePageCount) || 0,
+      inaccessibleFrameCount: Number(page.inaccessibleFrameCount) || 0,
+      characters: limited.length, truncated: Boolean(page.truncated || text.length > 200_000),
+      text: limited, operationId,
+      message: page.type === "google-docs-visible"
+        ? "Google Docs: se obtuvo solo el texto visible y accesible en esta vista. Para una copia completa, descarga DOCX/PDF."
+        : selectionOnly
+          ? "Selección recibida desde la pestaña activa. Revisa el texto antes de importarlo."
+          : "Extracción completada. Revisa el texto antes de importarlo."
+    };
+  } catch (error) {
+    const message = String(error?.message || "");
+    const isPermissionError = /cannot access|not allowed|permission|restricted|cannot be scripted|extensions gallery/i.test(message);
+    return {
+      ok: false, state: isPermissionError ? "site-permission-required" : "extraction-error",
+      type: classification.kind, title: context.title, operationId,
+      message: isPermissionError
+        ? "Edge no permitió acceder a esta página. Comprueba el permiso de sitio y vuelve a intentarlo."
+        : "Falló la extracción local. Puedes pegar el texto o descargar el documento y cargarlo manualmente."
+    };
+  }
 }
 
 async function extractAuthorizedTab(selectionOnly) {
@@ -278,13 +586,61 @@ async function setupContextMenu() {
 chrome.runtime.onInstalled.addListener(() => { void setupContextMenu(); });
 void setupContextMenu();
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+void restoreFollowState();
 
 chrome.action.onClicked.addListener((tab) => openPanelForTab(tab));
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url || changeInfo.status === "loading") void clearImportTarget(tabId);
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (followActiveTab && Number.isInteger(followWindowId) && windowId !== followWindowId) return;
+  if (!followActiveTab && Number.isInteger(activeTabContext?.windowId) && windowId !== activeTabContext.windowId) return;
+  void refreshContextForTab(tabId, windowId);
 });
-chrome.tabs.onRemoved.addListener((tabId) => { void clearImportTarget(tabId); });
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const navigated = Boolean(changeInfo.url || changeInfo.status === "loading");
+  if (navigated) {
+    if (inMemoryImportTarget?.tabId === tabId) inMemoryImportTarget = null;
+    documentTokens.delete(tabId);
+    void clearImportTarget(tabId).then(() => {
+      const sameWindow = followActiveTab
+        ? tab?.windowId === followWindowId
+        : tab?.windowId === activeTabContext?.windowId;
+      if (sameWindow && (tab?.active || activeTabContext?.tabId === tabId)) {
+        void refreshContextForTab(tabId, tab?.windowId, { forceNewDocument: true });
+      }
+    });
+    return;
+  }
+  const sameWindow = followActiveTab
+    ? tab?.windowId === followWindowId
+    : tab?.windowId === activeTabContext?.windowId;
+  if (sameWindow && tab?.active && (changeInfo.title || changeInfo.status === "complete")) {
+    void refreshContextForTab(tabId, tab.windowId);
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId, removeInfo = {}) => {
+  void clearImportTarget(tabId);
+  documentTokens.delete(tabId);
+  if (activeTabContext?.tabId !== tabId && !followActiveTab) return;
+  const windowId = Number.isInteger(removeInfo.windowId) ? removeInfo.windowId : followWindowId;
+  if (followActiveTab && Number.isInteger(followWindowId) && windowId !== followWindowId) return;
+  void refreshActiveTabContext({ windowId: Number.isInteger(windowId) ? windowId : null });
+});
+
+chrome.permissions?.onAdded?.addListener(() => {
+  if (followActiveTab && !followWindowId) void restoreFollowState();
+  else void refreshActiveTabContext({ windowId: followWindowId });
+});
+
+chrome.permissions?.onRemoved?.addListener((removed) => {
+  if (removed.permissions?.includes("tabs")) {
+    followActiveTab = false;
+    followWindowId = null;
+    void chrome.storage.local.set({ [FOLLOW_ACTIVE_TAB_KEY]: false }).catch(() => {});
+  }
+  void refreshActiveTabContext({ windowId: followWindowId });
+});
 
 chrome.contextMenus?.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== SELECTION_MENU_ID || !tab?.id) return;
@@ -292,9 +648,27 @@ chrome.contextMenus?.onClicked.addListener((info, tab) => {
   openPanelForTab(tab, selection, true);
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target !== "background") return undefined;
   const run = async () => {
+    if (message.command === "get-active-tab-context") {
+      const windowId = followActiveTab && Number.isInteger(followWindowId)
+        ? followWindowId
+        : Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null;
+      const context = await refreshActiveTabContext({ windowId });
+      return { ok: true, following: followActiveTab, context };
+    }
+    if (message.command === "set-follow-active-tab") {
+      const windowId = Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null;
+      return setFollowActiveTab(Boolean(message.enabled), windowId);
+    }
+    if (message.command === "extract-current-tab") {
+      return extractCurrentTab(Boolean(message.selectionOnly), message.context, message.operationId);
+    }
+    if (message.command === "validate-current-import") {
+      const result = await validateCurrentTabContext(message.context);
+      return { ...result, operationId: message.operationId };
+    }
     if (message.command === "extract-tab") return extractAuthorizedTab(Boolean(message.selectionOnly));
     if (message.command === "get-import-target") {
       const validated = await validateImportTarget();

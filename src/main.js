@@ -5,6 +5,7 @@ import { attemptInitialization, deriveReaderControls } from "./reader-state.js";
 import { makeId, ReaderRepository } from "./persistence.js";
 import { ReaderClient } from "./reader-client.js";
 import { KokoroWorkerClient } from "./tts-worker-client.js";
+import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
@@ -13,6 +14,7 @@ const ui = {
   library: $("#library-details"), librarySummary: $("#library-summary-count"), documentsList: $("#documents-list"),
   sessionsList: $("#sessions-list"), libraryStatus: $("#library-status"),
   importTab: $("#import-tab"), importSelection: $("#import-selection"), importStatus: $("#tab-import-status"),
+  followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
   replaceImport: $("#replace-with-import"), appendImport: $("#append-import"), cancelImport: $("#cancel-import"),
   voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"),
@@ -46,6 +48,9 @@ let editingForked = false;
 let pendingQueueReplacement = false;
 let pendingTabImport = null;
 let tabImportBusy = false;
+let currentTabContext = null;
+let activeImportOperation = 0;
+let followChangeSequence = 0;
 let fileSelectionPurpose = "document";
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -427,12 +432,80 @@ function tabImportTypeLabel(type) {
   })[type] || type || "contenido de pestaña";
 }
 
+function sameTabDocument(left, right) {
+  return Boolean(left && right
+    && left.tabId === right.tabId
+    && left.url === right.url
+    && left.documentToken === right.documentToken);
+}
+
+function describeTabContext(context) {
+  if (!context || context.state === "waiting") {
+    return { title: "Abre el lector desde la pestaña que quieras importar.", status: "Esperando selección" };
+  }
+  const title = context.title || "Pestaña sin título";
+  const location = context.location ? ` · ${context.location}` : "";
+  let state = "Página detectada";
+  if (context.state === "restricted") state = "Pestaña restringida";
+  else if (context.state === "tabs-permission-required") state = "Permiso de seguimiento requerido";
+  else if (context.state === "local-pdf" || context.state === "pdf") state = "PDF detectado";
+  else if (context.state === "local-document") state = "Archivo local detectado";
+  else if (context.state === "google-docs") state = "Google Docs detectado";
+  else if (context.state === "text-document") state = "Documento de texto detectado";
+  const details = [state, context.accessState, context.availability].filter(Boolean);
+  return { title: `${title}${location}`, status: details.join(" · ") };
+}
+
+function applyActiveTabContext(context, following) {
+  const previous = currentTabContext;
+  const changed = previous && !sameTabDocument(previous, context);
+  currentTabContext = context || null;
+  if (typeof following === "boolean") ui.followActiveTab.checked = following;
+  else if (typeof context?.following === "boolean") ui.followActiveTab.checked = context.following;
+
+  const presentation = describeTabContext(context);
+  ui.activeTabTitle.textContent = presentation.title;
+  ui.activeTabStatus.textContent = presentation.status;
+
+  if (changed) {
+    const discardedPreview = Boolean(pendingTabImport);
+    const interruptedImport = tabImportBusy;
+    activeImportOperation++;
+    tabImportBusy = false;
+    pendingTabImport = null;
+    ui.importPreview.hidden = true;
+    ui.importText.value = "";
+    ui.importTab.disabled = libraryMutationBusy;
+    ui.importSelection.disabled = libraryMutationBusy;
+    if (interruptedImport || discardedPreview) {
+      const message = "La pestaña de origen cambió. Se descartó la importación pendiente; el editor y la sesión actual siguen intactos.";
+      ui.importStatus.textContent = message;
+      ui.activeTabStatus.textContent = `${presentation.status} · ${message}`;
+    }
+  }
+}
+
+async function refreshActiveTabContext() {
+  const response = await chrome.runtime.sendMessage({ target: "background", command: "get-active-tab-context" }).catch(() => null);
+  if (response?.context) applyActiveTabContext(response.context, response.following);
+  return response;
+}
+
+function setImportStatus(message) {
+  ui.importStatus.textContent = message;
+  ui.activeTabStatus.textContent = message;
+}
+
 async function runTabImport(selectionOnly = false) {
   if (tabImportBusy || libraryMutationBusy) return;
+  const operationId = ++activeImportOperation;
+  const initialContext = currentTabContext;
+  // Keep the optional permission prompt inside the direct user click handler.
+  const permissionRequest = requestSitePermissionFromClick(initialContext, chrome.permissions);
   tabImportBusy = true;
   pendingTabImport = null;
   ui.importPreview.hidden = true;
-  ui.importStatus.textContent = "Detectando contenido de la pestaña activa…";
+  setImportStatus("Extracción en curso…");
   ui.importTab.disabled = true;
   ui.importSelection.disabled = true;
   ui.chooseSourceFile.hidden = true;
@@ -440,29 +513,63 @@ async function runTabImport(selectionOnly = false) {
   ui.chooseSourceFile.textContent = "Elegir archivo para importar";
   ui.chooseSourceFile.dataset.previewPdf = "false";
   try {
-    ui.importStatus.textContent = "Consultando la pestaña autorizada…";
-    let result = await chrome.runtime.sendMessage({ target: "background", command: "extract-tab", selectionOnly });
+    if (!initialContext?.tabId || !initialContext.url || !initialContext.documentToken) {
+      await refreshActiveTabContext();
+      if (operationId === activeImportOperation) {
+        setImportStatus("No se conoce la dirección actual. Activa «Seguir pestaña activa» o abre el lector desde la pestaña deseada y vuelve a intentarlo.");
+      }
+      return;
+    }
+    if (permissionRequest) {
+      let granted = false;
+      try { granted = await permissionRequest; } catch { granted = false; }
+      if (operationId !== activeImportOperation) return;
+      if (!granted) {
+        setImportStatus("No se concedió permiso para este sitio. Sin esa autorización, Edge no permite extraer su contenido. Puedes copiar y pegar el texto.");
+        return;
+      }
+    }
+
+    const latestResponse = await chrome.runtime.sendMessage({ target: "background", command: "get-active-tab-context" }).catch(() => null);
+    if (operationId !== activeImportOperation) return;
+    const latestContext = latestResponse?.context;
+    if (!latestContext || !sameTabDocument(initialContext, latestContext)) {
+      if (latestContext) applyActiveTabContext(latestContext, latestResponse.following);
+      setImportStatus("La pestaña o el documento cambió antes de iniciar la extracción. Revisa el origen actual y vuelve a intentarlo.");
+      return;
+    }
+    applyActiveTabContext(latestContext, latestResponse.following);
+    let result = await chrome.runtime.sendMessage({
+      target: "background", command: "extract-current-tab", selectionOnly,
+      context: latestContext, operationId
+    });
+    if (operationId !== activeImportOperation || result?.operationId !== operationId) return;
     if (result?.state === "pdf-target" || result?.state === "local-pdf-target") {
       const localPdf = result.state === "local-pdf-target";
-      ui.importStatus.textContent = localPdf ? "PDF local detectado · permiso activo; intentando recuperar el archivo…" : "PDF detectado · extrayendo texto localmente…";
+      setImportStatus(localPdf ? "PDF local detectado · intentando recuperar el archivo…" : "PDF detectado · extrayendo texto localmente…");
       const pdfTarget = result;
       const { importCurrentTab } = await import("./tab-import.js");
       result = await importCurrentTab({
         targetTab: pdfTarget.targetTab,
         fileAccessAllowed: localPdf && pdfTarget.fileAccessAllowed === true,
         selectionOnly: false,
-        onStatus: ({ message }) => { if (message) ui.importStatus.textContent = message; }
+        onStatus: ({ message }) => { if (message && operationId === activeImportOperation) setImportStatus(message); }
       });
+      if (operationId !== activeImportOperation) return;
       if (result.ok) {
         const validation = await chrome.runtime.sendMessage({
-          target: "background", command: "validate-import-target", expectedToken: pdfTarget.targetToken
+          target: "background", command: "validate-current-import",
+          context: pdfTarget.documentContext, operationId
         });
+        if (operationId !== activeImportOperation) return;
         if (!validation?.ok) result = { ...validation, type: localPdf ? "local-pdf" : "pdf", title: pdfTarget.targetTab.title };
       }
     }
+    if (operationId !== activeImportOperation) return;
     if (!result.ok) {
       const details = [result.title, result.type ? tabImportTypeLabel(result.type) : "", result.sourceUrl].filter(Boolean);
-      ui.importStatus.textContent = `${details.length ? `${details.join(" · ")}\n` : ""}${result.message || "No se pudo extraer el contenido."}`;
+      const message = `${details.length ? `${details.join(" · ")}\n` : ""}${result.message || "No se pudo extraer el contenido."}`;
+      setImportStatus(message);
       const { localPdfRecoveryActions } = await import("./tab-import.js");
       const actions = localPdfRecoveryActions(result);
       ui.chooseSourceFile.hidden = !actions.selectPdf;
@@ -472,13 +579,17 @@ async function runTabImport(selectionOnly = false) {
       return;
     }
     showTabImportPreview(result);
+    setImportStatus(`Texto extraído correctamente · ${result.characters.toLocaleString()} caracteres. Revisa la vista previa antes de importarlo.`);
   } catch (error) {
-    ui.importStatus.textContent = error?.message || "No se pudo extraer el contenido de esta pestaña.";
+    if (operationId !== activeImportOperation) return;
+    setImportStatus(error?.message || "No se pudo extraer el contenido de esta pestaña.");
     ui.chooseSourceFile.hidden = false;
   } finally {
-    tabImportBusy = false;
-    ui.importTab.disabled = libraryMutationBusy;
-    ui.importSelection.disabled = libraryMutationBusy;
+    if (operationId === activeImportOperation) {
+      tabImportBusy = false;
+      ui.importTab.disabled = libraryMutationBusy;
+      ui.importSelection.disabled = libraryMutationBusy;
+    }
   }
 }
 
@@ -891,8 +1002,7 @@ async function boot() {
   if (!currentDocument && preferredSession) {
     await activateSession(preferredSession);
     await refreshModelCacheState();
-    const context = await chrome.runtime.sendMessage({ target: "background", command: "get-import-target" }).catch(() => null);
-    if (context?.ok && context.target?.title) ui.importStatus.textContent = `Pestaña de origen: ${context.target.title}. Para cambiarla, invoca la extensión desde la pestaña deseada.`;
+    await refreshActiveTabContext();
     const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
     if (pending?.selection) handlePendingSelection(pending.selection);
     return;
@@ -901,8 +1011,7 @@ async function boot() {
   if (!currentDocument) currentDocument = await repository.saveDocument({ id: makeId("document"), name: "Texto pegado", type: "text", text: "" });
   await activateDocument(currentDocument, preferences.lastSessionId);
   await refreshModelCacheState();
-  const context = await chrome.runtime.sendMessage({ target: "background", command: "get-import-target" }).catch(() => null);
-  if (context?.ok && context.target?.title) ui.importStatus.textContent = `Pestaña autorizada: ${context.target.title}. Para cambiarla, invoca la extensión desde la pestaña deseada.`;
+  await refreshActiveTabContext();
   const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
   if (pending?.selection) handlePendingSelection(pending.selection);
 }
@@ -951,6 +1060,7 @@ function handlePendingSelection(selection) {
     ui.importStatus.textContent = "El menú contextual no recibió texto seleccionado. Selecciona texto y vuelve a usar ‘Enviar selección al lector local’.";
     return;
   }
+  ui.activeTabStatus.textContent = "Texto seleccionado disponible · Revisa la vista previa antes de incorporarlo.";
   showTabImportPreview({
     ok: true, title: selection.title || "Selección de pestaña", sourceUrl: selection.sourceUrl || "",
     type: "selection", coverage: "selection", text, characters: text.length,
@@ -960,7 +1070,42 @@ function handlePendingSelection(selection) {
 
 let lastPendingSelectionId = null;
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.target === "panel" && message.type === "active-tab-context") {
+    applyActiveTabContext(message.context, message.context?.following);
+  }
   if (message?.target === "panel" && message.type === "tab-selection") handlePendingSelection(message.selection);
+});
+
+ui.followActiveTab.addEventListener("change", () => {
+  const enabled = ui.followActiveTab.checked;
+  const changeSequence = ++followChangeSequence;
+  // Request the optional tabs permission before any await so Edge can associate it with this click.
+  const permissionRequest = enabled ? requestTabsPermissionFromClick(currentTabContext, chrome.permissions) : null;
+  void (async () => {
+    if (permissionRequest) {
+      let granted = false;
+      try { granted = await permissionRequest; } catch { granted = false; }
+      if (changeSequence !== followChangeSequence) return;
+      if (!granted) {
+        ui.followActiveTab.checked = false;
+        ui.activeTabStatus.textContent = "No se concedió el permiso para identificar la pestaña. Puedes abrir el lector desde la página deseada para importarla.";
+        return;
+      }
+    }
+    const response = await chrome.runtime.sendMessage({ target: "background", command: "set-follow-active-tab", enabled }).catch(() => null);
+    if (changeSequence !== followChangeSequence) return;
+    if (!response?.ok) {
+      ui.followActiveTab.checked = false;
+      ui.activeTabStatus.textContent = response?.state === "tabs-permission-required"
+        ? "Activa el permiso de seguimiento para identificar la página actual. El resto del lector sigue disponible."
+        : "No se pudo actualizar el seguimiento. Vuelve a intentarlo.";
+      return;
+    }
+    applyActiveTabContext(response.context, response.following);
+    if (response.following) {
+      ui.activeTabStatus.textContent = "Seguimiento activo · Edge usa el título y la dirección solo para identificar la pestaña actual.";
+    }
+  })();
 });
 
 ui.file.addEventListener("change", async () => {
