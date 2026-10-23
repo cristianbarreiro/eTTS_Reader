@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="etts-compact-gradient" x1="0" y1="8" x2="0" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58F1FF"/>
+      <stop offset=".52" stop-color="#16B8FF"/>
+      <stop offset="1" stop-color="#245BFF"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#etts-compact-gradient)">
+    <rect x="4" y="22" width="8" height="20" rx="4"/>
+    <rect x="16" y="16" width="8" height="32" rx="4"/>
+    <rect x="28" y="8" width="8" height="48" rx="4"/>
+    <rect x="40" y="16" width="8" height="32" rx="4"/>
+    <rect x="52" y="22" width="8" height="20" rx="4"/>
+  </g>
+</svg>

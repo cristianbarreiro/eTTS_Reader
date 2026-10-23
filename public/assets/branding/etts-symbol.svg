@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="etts-audio-gradient" x1="0" y1="8" x2="0" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58F1FF"/>
+      <stop offset=".52" stop-color="#16B8FF"/>
+      <stop offset="1" stop-color="#245BFF"/>
+    </linearGradient>
+    <filter id="etts-soft-glow" x="-24%" y="-24%" width="148%" height="148%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="1.7" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.08 0 0 0 0 0.56 0 0 0 0 1 0 0 0 .3 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g fill="url(#etts-audio-gradient)" filter="url(#etts-soft-glow)">
+    <rect x="4" y="22" width="8" height="20" rx="4"/>
+    <rect x="16" y="16" width="8" height="32" rx="4"/>
+    <rect x="28" y="8" width="8" height="48" rx="4"/>
+    <rect x="40" y="16" width="8" height="32" rx="4"/>
+    <rect x="52" y="22" width="8" height="20" rx="4"/>
+  </g>
+</svg>
