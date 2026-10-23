@@ -71,6 +71,19 @@ test("reader controls stay disabled while idle, loading, or failed; retry is ena
   assert.equal(deriveReaderControls("ready", 0).canPlay, false);
 });
 
+test("cached model files do not count as an initialized engine", () => {
+  const cached = deriveReaderControls("cached", 1);
+  assert.equal(cached.canPlay, false);
+  assert.equal(cached.canTestVoice, false);
+  assert.equal(cached.canInitialize, true);
+
+  const cachedAudio = deriveReaderControls("cached", 1, false, { audioAvailable: true });
+  assert.equal(cachedAudio.canPlay, true, "an existing WAV can play without loading Kokoro");
+  assert.equal(cachedAudio.canTestVoice, false, "a voice test still requires an initialized engine");
+  assert.equal(cachedAudio.canInitialize, true);
+  assert.equal(deriveReaderControls("error", 1, true).canPause, true, "an active player remains pausable after a model error");
+});
+
 test("a listed system voice can play and pause without initializing Kokoro", () => {
   const system = deriveReaderControls("idle", 1, false, { provider: "speechSynthesis", systemVoiceAvailable: true });
   assert.equal(system.canInitialize, false);

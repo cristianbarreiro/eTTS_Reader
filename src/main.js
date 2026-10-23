@@ -9,6 +9,7 @@ import { ReaderClient } from "./reader-client.js";
 import { getVoiceProvider, isSystemVoiceId, voiceSessionFields } from "./voice-catalog.js";
 import { SystemSpeechProvider } from "./system-speech.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
+import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
@@ -16,6 +17,8 @@ const ui = {
   fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
   library: $("#library-details"), librarySummary: $("#library-summary-count"), libraryList: $("#library-list"),
   libraryStatus: $("#library-status"),
+  appAlert: $("#app-alert"), appAlertMessage: $("#app-alert-message"), errorDetails: $("#app-error-details"), errorTechnical: $("#app-error-technical"), dismissAppAlert: $("#dismiss-app-alert"),
+  sourceCard: $("#source-card"), activeTabKind: $("#active-tab-kind"), activeTabDomain: $("#active-tab-domain"),
   importTab: $("#import-tab"), importSelection: $("#import-selection"), importStatus: $("#tab-import-status"),
   followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
@@ -57,6 +60,7 @@ let fileSelectionPurpose = "document";
 let systemVoices = [];
 const systemVoiceCatalog = new SystemSpeechProvider();
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const panelStatus = createPanelStatusState();
 
 const player = new ReaderClient({
   onState: (snapshot) => {
@@ -72,27 +76,37 @@ const player = new ReaderClient({
       if (snapshot.currentAudioKey) currentSession.audioKeys[snapshot.selectedIndex] = snapshot.currentAudioKey;
     }
     renderPlayer(snapshot);
+    if (snapshot.status === "error" && snapshot.message) showError(snapshot.message, "playback");
     void refreshDownloadLink(snapshot.currentAudioKey);
   },
   onModel: handleModelMessage
 });
 
+function syncImportButtons() {
+  const canImport = panelStatus.snapshot().tab.canImport;
+  const unavailable = libraryMutationBusy || tabImportBusy || !canImport;
+  ui.importTab.disabled = unavailable;
+  ui.importSelection.disabled = unavailable;
+}
+
 function setContentBusy(busy) {
   ui.library.setAttribute("aria-busy", String(busy));
-  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.importTab, ui.importSelection, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed]) {
-    if (control) control.disabled = busy || (busy === false && tabImportBusy && [ui.importTab, ui.importSelection].includes(control));
+  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed]) {
+    if (control) control.disabled = busy;
   }
+  syncImportButtons();
   for (const button of ui.library.querySelectorAll("button")) button.disabled = busy;
 }
 
-function controlsModelState() { return modelState === "cached" ? "ready" : modelState; }
+function controlsModelState() { return modelState; }
 function readerControls(snapshot = player.snapshot()) {
   const isCurrentSpeech = snapshot.activeProvider === "speechSynthesis" && ["playing", "paused", "audio-ready"].includes(snapshot.status);
   const voiceId = isCurrentSpeech ? snapshot.activeVoiceId : ui.voice.value;
   const provider = getVoiceProvider(voiceId);
   return deriveReaderControls(controlsModelState(), snapshot.chunks.length, snapshot.status === "playing", {
     provider,
-    systemVoiceAvailable: provider === "speechSynthesis" && (isCurrentSpeech || systemVoices.some((voice) => voice.id === voiceId))
+    systemVoiceAvailable: provider === "speechSynthesis" && (isCurrentSpeech || systemVoices.some((voice) => voice.id === voiceId)),
+    audioAvailable: provider === "kokoro" && Boolean(snapshot.currentAudioKey || currentSession?.audioKeys?.[snapshot.selectedIndex])
   });
 }
 
@@ -118,10 +132,10 @@ function updateVoiceProviderUI() {
   ui.engineState.dataset.state = modelState;
   ui.voiceNote.textContent = "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
   ui.privacyNote.textContent = "Con Kokoro, el texto se sintetiza localmente; la red solo se usa para descargar los pesos solicitados.";
-  ui.install.disabled = ["loading", "ready", "cached"].includes(modelState);
+  ui.install.disabled = ["loading", "ready"].includes(modelState);
   ui.install.textContent = ({
     idle: "Preparar Kokoro local",
-    cached: "Modelo preparado",
+    cached: "Cargar modelo local",
     loading: "Preparando Kokoro…",
     ready: "Modelo preparado",
     error: "Reintentar carga local"
@@ -174,6 +188,7 @@ function describePlayer(snapshot) {
     ? `Muestra pausada en ${formatTime(snapshot.currentTime)}.`
     : `Lectura pausada en ${formatTime(snapshot.currentTime)} del fragmento ${snapshot.selectedIndex + 1}.`;
   if (snapshot.status === "interrupted") return snapshot.message || "La sesión se guardó. Pulsa Reanudar para continuar.";
+  if (snapshot.status === "error") return userFacingErrorMessage(snapshot.message, "playback");
   return snapshot.message;
 }
 
@@ -265,7 +280,7 @@ async function refreshDownloadLink(audioKey) {
     ui.downloadAudio.setAttribute("aria-label", `Descargar ${player.snapshot().activeKind === "preview" ? "muestra de voz" : `audio del fragmento ${selected}`}`);
     ui.downloadAudio.hidden = false;
   } catch (error) {
-    ui.fileStatus.textContent = `No se pudo abrir el audio guardado: ${error.message}`;
+    ui.fileStatus.textContent = showError(error, "playback");
   }
 }
 
@@ -288,7 +303,7 @@ function handleModelMessage(message) {
     ui.downloadProgress.hidden = true;
   } else if (message.state === "error") {
     modelState = "error";
-    ui.modelStatus.textContent = `${message.message || "Falló el motor local."} Puedes reintentar.`;
+    ui.modelStatus.textContent = showError(message.message || "Kokoro no pudo iniciarse.", "model");
     ui.downloadProgress.hidden = true;
   }
   ui.engineState.textContent = modelLabel();
@@ -344,7 +359,7 @@ async function refreshSystemVoices() {
     const selectedBeforeRefresh = ui.voice.value;
     systemVoices = [];
     ensureStoredVoiceOption(selectedBeforeRefresh);
-    ui.modelStatus.textContent = `No se pudieron consultar las voces españolas del sistema: ${error.message}`;
+    ui.modelStatus.textContent = showError(error, "voice");
   }
   updateVoiceProviderUI();
   renderPlayer(player.snapshot());
@@ -428,14 +443,15 @@ function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
     await chrome.storage.local.set({ lastDocumentId: currentDocument.id, lastSessionId: currentSession.id });
     if (replaceQueue) {
       await player.replace(currentSession).catch((error) => {
-        ui.playbackStatus.textContent = `El texto quedó guardado; no se pudo actualizar la cola activa: ${error.message}`;
+        const message = showError(error, "playback");
+        ui.playbackStatus.textContent = `El texto quedó guardado, pero la cola no se actualizó. ${message}`;
       });
       pendingQueueReplacement = false;
     }
     if (ui.library.open) await refreshLibrary();
     await refreshStorageUsage();
   }).catch((error) => {
-    ui.fileStatus.textContent = `No se pudo guardar el texto local: ${error.message}. Reintenta o exporta el contenido.`;
+    ui.fileStatus.textContent = showError(error, "storage");
   });
   return persistenceChain;
 }
@@ -620,21 +636,10 @@ function sameTabDocument(left, right) {
     && left.documentToken === right.documentToken);
 }
 
-function describeTabContext(context) {
-  if (!context || context.state === "waiting") {
-    return { title: "Abre el lector desde la pestaña que quieras importar.", status: "Esperando selección" };
-  }
-  const title = context.title || "Pestaña sin título";
-  const location = context.location ? ` · ${context.location}` : "";
-  let state = "Página detectada";
-  if (context.state === "restricted") state = "Pestaña restringida";
-  else if (context.state === "tabs-permission-required") state = "Permiso de seguimiento requerido";
-  else if (context.state === "local-pdf" || context.state === "pdf") state = "PDF detectado";
-  else if (context.state === "local-document") state = "Archivo local detectado";
-  else if (context.state === "google-docs") state = "Google Docs detectado";
-  else if (context.state === "text-document") state = "Documento de texto detectado";
-  const details = [state, context.accessState, context.availability].filter(Boolean);
-  return { title: `${title}${location}`, status: details.join(" · ") };
+function setImportStatus(message, state = "info") {
+  const view = panelStatus.setImportStatus(message, state);
+  ui.importStatus.textContent = view.import.message;
+  ui.importStatus.dataset.state = view.import.state;
 }
 
 function applyActiveTabContext(context, following) {
@@ -644,9 +649,15 @@ function applyActiveTabContext(context, following) {
   if (typeof following === "boolean") ui.followActiveTab.checked = following;
   else if (typeof context?.following === "boolean") ui.followActiveTab.checked = context.following;
 
-  const presentation = describeTabContext(context);
+  const presentation = panelStatus.setTabContext(context).tab;
+  ui.sourceCard.dataset.state = presentation.state;
   ui.activeTabTitle.textContent = presentation.title;
+  ui.activeTabDomain.textContent = presentation.domain;
+  ui.activeTabDomain.hidden = !presentation.domain;
+  ui.activeTabKind.textContent = presentation.contentType;
+  ui.activeTabKind.dataset.state = presentation.state;
   ui.activeTabStatus.textContent = presentation.status;
+  syncImportButtons();
 
   if (changed) {
     const discardedPreview = Boolean(pendingTabImport);
@@ -656,12 +667,10 @@ function applyActiveTabContext(context, following) {
     pendingTabImport = null;
     ui.importPreview.hidden = true;
     ui.importText.value = "";
-    ui.importTab.disabled = libraryMutationBusy;
-    ui.importSelection.disabled = libraryMutationBusy;
+    syncImportButtons();
     if (interruptedImport || discardedPreview) {
       const message = "La pestaña de origen cambió. Se descartó la importación pendiente; el editor y la sesión actual siguen intactos.";
-      ui.importStatus.textContent = message;
-      ui.activeTabStatus.textContent = `${presentation.status} · ${message}`;
+      setImportStatus(message, "warning");
     }
   }
 }
@@ -672,10 +681,7 @@ async function refreshActiveTabContext() {
   return response;
 }
 
-function setImportStatus(message) {
-  ui.importStatus.textContent = message;
-  ui.activeTabStatus.textContent = message;
-}
+
 
 async function runTabImport(selectionOnly = false) {
   if (tabImportBusy || libraryMutationBusy) return;
@@ -686,9 +692,8 @@ async function runTabImport(selectionOnly = false) {
   tabImportBusy = true;
   pendingTabImport = null;
   ui.importPreview.hidden = true;
-  setImportStatus("Extracción en curso…");
-  ui.importTab.disabled = true;
-  ui.importSelection.disabled = true;
+  setImportStatus("Extracción en curso…", "loading");
+  syncImportButtons();
   ui.chooseSourceFile.hidden = true;
   ui.retryFileAccess.hidden = true;
   ui.chooseSourceFile.textContent = "Elegir archivo para importar";
@@ -697,7 +702,7 @@ async function runTabImport(selectionOnly = false) {
     if (!initialContext?.tabId || !initialContext.url || !initialContext.documentToken) {
       await refreshActiveTabContext();
       if (operationId === activeImportOperation) {
-        setImportStatus("No se conoce la dirección actual. Activa «Seguir pestaña activa» o abre el lector desde la pestaña deseada y vuelve a intentarlo.");
+        setImportStatus("No se conoce la dirección actual. Activa «Seguir pestaña activa» o abre el lector desde la pestaña deseada y vuelve a intentarlo.", "warning");
       }
       return;
     }
@@ -706,7 +711,7 @@ async function runTabImport(selectionOnly = false) {
       try { granted = await permissionRequest; } catch { granted = false; }
       if (operationId !== activeImportOperation) return;
       if (!granted) {
-        setImportStatus("No se concedió permiso para este sitio. Sin esa autorización, Edge no permite extraer su contenido. Puedes copiar y pegar el texto.");
+        setImportStatus("No se concedió permiso para este sitio. Sin esa autorización, Edge no permite extraer su contenido. Puedes copiar y pegar el texto.", "error");
         return;
       }
     }
@@ -716,7 +721,7 @@ async function runTabImport(selectionOnly = false) {
     const latestContext = latestResponse?.context;
     if (!latestContext || !sameTabDocument(initialContext, latestContext)) {
       if (latestContext) applyActiveTabContext(latestContext, latestResponse.following);
-      setImportStatus("La pestaña o el documento cambió antes de iniciar la extracción. Revisa el origen actual y vuelve a intentarlo.");
+      setImportStatus("La pestaña o el documento cambió antes de iniciar la extracción. Revisa el origen actual y vuelve a intentarlo.", "warning");
       return;
     }
     applyActiveTabContext(latestContext, latestResponse.following);
@@ -727,7 +732,7 @@ async function runTabImport(selectionOnly = false) {
     if (operationId !== activeImportOperation || result?.operationId !== operationId) return;
     if (result?.state === "pdf-target" || result?.state === "local-pdf-target") {
       const localPdf = result.state === "local-pdf-target";
-      setImportStatus(localPdf ? "PDF local detectado · intentando recuperar el archivo…" : "PDF detectado · extrayendo texto localmente…");
+      setImportStatus(localPdf ? "PDF local detectado · intentando recuperar el archivo…" : "PDF detectado · extrayendo texto localmente…", "loading");
       const pdfTarget = result;
       const { importCurrentTab } = await import("./tab-import.js");
       result = await importCurrentTab({
@@ -750,7 +755,7 @@ async function runTabImport(selectionOnly = false) {
     if (!result.ok) {
       const details = [result.title, result.type ? tabImportTypeLabel(result.type) : "", result.sourceUrl].filter(Boolean);
       const message = `${details.length ? `${details.join(" · ")}\n` : ""}${result.message || "No se pudo extraer el contenido."}`;
-      setImportStatus(message);
+      setImportStatus(message, "error");
       const { localPdfRecoveryActions } = await import("./tab-import.js");
       const actions = localPdfRecoveryActions(result);
       ui.chooseSourceFile.hidden = !actions.selectPdf;
@@ -760,16 +765,15 @@ async function runTabImport(selectionOnly = false) {
       return;
     }
     showTabImportPreview(result);
-    setImportStatus(`Texto extraído correctamente · ${result.characters.toLocaleString()} caracteres. Revisa la vista previa antes de importarlo.`);
+    setImportStatus(`Vista previa extraída · ${result.characters.toLocaleString()} caracteres · pendiente de confirmación.`, "preview");
   } catch (error) {
     if (operationId !== activeImportOperation) return;
-    setImportStatus(error?.message || "No se pudo extraer el contenido de esta pestaña.");
+    setImportStatus(showError(error, "import"), "error");
     ui.chooseSourceFile.hidden = false;
   } finally {
     if (operationId === activeImportOperation) {
       tabImportBusy = false;
-      ui.importTab.disabled = libraryMutationBusy;
-      ui.importSelection.disabled = libraryMutationBusy;
+      syncImportButtons();
     }
   }
 }
@@ -782,7 +786,7 @@ function showTabImportPreview(result) {
   const coverage = result.coverage === "visible-pages" ? " · solo páginas visibles accesibles" : "";
   const frames = result.inaccessibleFrameCount ? ` · ${result.inaccessibleFrameCount} frame(s) no accesible(s)` : "";
   ui.importMeta.textContent = `${result.title || "Pestaña actual"} · ${tabImportTypeLabel(result.type)} · ${Number(result.characters ?? result.text.length).toLocaleString()} caracteres${clipped}${coverage}${frames}\n${source}`;
-  ui.importStatus.textContent = result.message || "Extracción completada. Revisa el resultado antes de importarlo.";
+  setImportStatus(result.message || "Vista previa lista. Confirma si quieres reemplazar o añadir el texto.", "preview");
   ui.importPreview.hidden = false;
   ui.chooseSourceFile.hidden = true;
   ui.retryFileAccess.hidden = true;
@@ -796,19 +800,25 @@ async function acceptTabImport(mode) {
   const { combineImportedText } = await import("./tab-import.js");
   const previousText = ui.text.value;
   const append = mode === "append";
-  if (!append && previousText.trim() && !confirm("Reemplazar el texto del editor? El documento y las sesiones anteriores seguirán guardados.")) return;
+  if (!append && previousText.trim() && !confirm("Reemplazar el texto del editor? El documento y las sesiones anteriores seguirán guardados.")) {
+    setImportStatus("Importación cancelada. El contenido del editor sigue intacto.", "cancelled");
+    return;
+  }
   const maxLength = Number(ui.text.maxLength) || 200_000;
   let merged = combineImportedText(previousText, imported.text, mode, { maxCharacters: maxLength });
   if (merged.confirmationRequired) {
-    if (!confirm(`${merged.message} Añadirlo de todos modos?`)) return;
+    if (!confirm(`${merged.message} Añadirlo de todos modos?`)) {
+      setImportStatus("Adición cancelada. El contenido del editor sigue intacto.", "cancelled");
+      return;
+    }
     merged = combineImportedText(previousText, imported.text, mode, { maxCharacters: maxLength, allowDuplicate: true });
   }
   if (!merged.ok) {
-    ui.importStatus.textContent = `${merged.message} No se cambió el contenido.`;
+    setImportStatus(`${merged.message} No se cambió el contenido.`, "warning");
     return;
   }
   if (!merged.text.trim()) {
-    ui.importStatus.textContent = "La importación no contiene texto. No se creó un documento vacío.";
+    setImportStatus("La importación no contiene texto. No se creó un documento vacío.", "warning");
     return;
   }
   if (libraryMutationBusy) return;
@@ -856,16 +866,17 @@ async function acceptTabImport(mode) {
     updateTextInfo();
     pendingTabImport = null;
     ui.importPreview.hidden = true;
-    ui.importStatus.textContent = `${append ? "Contenido añadido" : "Contenido reemplazado"} · ${imported.text.length.toLocaleString()} caracteres importados · ${currentSession.chunks.length} fragmentos. Pulsa Reproducir cuando estés listo.`;
+    setImportStatus(`${append ? "Contenido añadido" : "Contenido reemplazado"} · ${imported.text.length.toLocaleString()} caracteres importados · ${currentSession.chunks.length} fragmentos. El texto ya está en el editor.`, "success");
     try {
       await chrome.storage.local.set({ lastDocumentId: currentDocument.id, lastSessionId: currentSession.id });
       if (ui.library.open) await refreshLibrary();
       await refreshStorageUsage();
     } catch (error) {
-      ui.fileStatus.textContent = `Contenido importado y guardado; no se actualizó alguna preferencia local: ${error.message}`;
+      const message = showError(error, "storage");
+      ui.fileStatus.textContent = `Contenido importado y guardado; una preferencia local no se actualizó. ${message}`;
     }
   } catch (error) {
-    ui.importStatus.textContent = `No se pudo guardar la importación: ${error?.message || "error local"}. El editor conserva su contenido.`;
+    setImportStatus(showError(error, "storage"), "error");
     return;
   } finally {
     libraryMutationBusy = false;
@@ -918,7 +929,7 @@ async function initializeModel() {
     return true;
   })().catch((error) => {
     modelState = "error";
-    ui.modelStatus.textContent = `${error.message || "No se pudo inicializar Kokoro."} Puedes reintentar. El texto permanece en este dispositivo.`;
+    ui.modelStatus.textContent = showError(error, "model");
     ui.downloadProgress.hidden = true;
     updateVoiceProviderUI();
     renderPlayer(player.snapshot());
@@ -1106,7 +1117,7 @@ async function deleteLibraryDocument(documentId) {
       } catch { player.setSession(null); }
       ui.fileStatus.textContent = `Documento “${document.name}” eliminado; hubo un problema al actualizar la selección.`;
     }
-    ui.libraryStatus.textContent = `No se pudo eliminar el documento: ${error.message}`;
+    ui.libraryStatus.textContent = showError(error, "library");
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
@@ -1166,7 +1177,7 @@ async function deleteLibrarySession(sessionId) {
     ui.libraryStatus.textContent = `Sesión “${name}” eliminada. Los audios compartidos y el modelo se conservaron.`;
     await refreshStorageUsage();
   } catch (error) {
-    ui.libraryStatus.textContent = `No se pudo eliminar la sesión: ${error.message}`;
+    ui.libraryStatus.textContent = showError(error, "library");
     if (wasActive) {
       currentSession = await repository.getSession(sessionId).catch(() => null);
       if (currentSession) {
@@ -1225,7 +1236,7 @@ async function deleteRecoveredLibraryEntry(entry) {
     ui.libraryStatus.textContent = `${sessions.length === 1 ? "Sesión recuperada eliminada" : `${sessions.length} sesiones recuperadas eliminadas`}. Los audios compartidos y el modelo se conservaron.`;
     await refreshStorageUsage();
   } catch (error) {
-    ui.libraryStatus.textContent = `No se pudieron eliminar todas las sesiones recuperadas: ${error.message}`;
+    ui.libraryStatus.textContent = showError(error, "library");
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
@@ -1300,10 +1311,9 @@ function handlePendingSelection(selection) {
   lastPendingSelectionId = selection.id;
   const text = String(selection.text || "");
   if (!text.trim()) {
-    ui.importStatus.textContent = "El menú contextual no recibió texto seleccionado. Selecciona texto y vuelve a usar ‘Enviar selección al lector local’.";
+    setImportStatus("El menú contextual no recibió texto seleccionado. Selecciona texto y vuelve a usar ‘Enviar selección al lector local’.", "error");
     return;
   }
-  ui.activeTabStatus.textContent = "Texto seleccionado disponible · Revisa la vista previa antes de incorporarlo.";
   showTabImportPreview({
     ok: true, title: selection.title || "Selección de pestaña", sourceUrl: selection.sourceUrl || "",
     type: "selection", coverage: "selection", text, characters: text.length,
@@ -1400,9 +1410,9 @@ ui.file.addEventListener("change", async () => {
     await refreshStorageUsage();
   } catch (error) {
     if (currentReadId === fileReadId) {
-      const message = error.message || "No se pudo leer el archivo.";
+      const message = showError(error, "file");
       ui.fileStatus.textContent = message;
-      if (selectionPurpose === "local-pdf-preview") ui.importStatus.textContent = `${message} El editor y la sesión actual no cambiaron.`;
+      if (selectionPurpose === "local-pdf-preview") setImportStatus(`${message} El editor y la sesión actual no cambiaron.`, "error");
     }
   } finally {
     libraryMutationBusy = false;
@@ -1420,7 +1430,7 @@ ui.cancelImport.addEventListener("click", () => {
   pendingTabImport = null;
   ui.importPreview.hidden = true;
   ui.importText.value = "";
-  ui.importStatus.textContent = "Importación cancelada; el editor no cambió.";
+  setImportStatus("Importación cancelada. El contenido del editor sigue intacto.", "cancelled");
 });
 
 for (const eventName of ["dragenter", "dragover"]) ui.drop.addEventListener(eventName, (event) => {
@@ -1520,11 +1530,17 @@ ui.deleteModel.addEventListener("click", async () => {
   } catch (error) { showError(error); }
 });
 
-function showError(error) {
-  const message = error?.message || "Ocurrió un error local.";
-  ui.playbackStatus.textContent = message;
-  ui.fileStatus.textContent = message;
+function showError(error, action = "general") {
+  const message = userFacingErrorMessage(error, action);
+  const detail = String(error?.message || error || "");
+  ui.appAlertMessage.textContent = message;
+  ui.appAlert.hidden = false;
+  ui.errorDetails.hidden = !detail;
+  ui.errorTechnical.textContent = detail;
+  return message;
 }
+
+ui.dismissAppAlert.addEventListener("click", () => { ui.appAlert.hidden = true; });
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
@@ -1554,7 +1570,7 @@ ui.engineState.textContent = modelLabel();
 ui.engineState.dataset.state = modelState;
 ui.downloadProgress.hidden = true;
 void boot().catch((error) => {
-  ui.fileStatus.textContent = `No se pudo recuperar la biblioteca local: ${error.message}. El texto no se eliminará.`;
+  ui.fileStatus.textContent = showError(error, "library");
   modelState = "error";
   ui.engineState.textContent = modelLabel();
   ui.engineState.dataset.state = modelState;
