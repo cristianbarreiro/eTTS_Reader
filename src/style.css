@@ -79,20 +79,25 @@ textarea[readonly] { min-height: 96px; max-height: 170px; resize: vertical; back
 
 .source-card { padding: 13px 14px; background: var(--surface-soft); }
 .source-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.source-identity { display: flex; min-width: 0; align-items: center; gap: 9px; }
-.source-icon { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border: 1px solid var(--border); border-radius: 10px; color: var(--muted-strong); }
-.source-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.source-copy h2 { font-size: 13px; }
+.source-header h2 { min-width: 0; font-size: 15px; }
 .follow-tab-toggle { display: inline-flex; min-height: 34px; flex: 0 0 auto; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; cursor: pointer; }
 .follow-tab-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-.source-location { display: grid; min-width: 0; gap: 2px; margin: 11px 1px 6px 43px; }
-.active-tab-title { overflow: hidden; color: var(--text); font-size: 11px; font-weight: 650; line-height: 1.35; text-overflow: ellipsis; }
-.active-tab-domain { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.source-status-row { display: flex; min-width: 0; align-items: flex-start; gap: 8px; margin: 7px 0 3px 43px; }
+.source-tab-details { display: flex; min-width: 0; align-items: center; gap: 12px; margin: 10px 0 8px; }
+.source-favicon-frame { display: grid; width: 52px; height: 52px; flex: 0 0 52px; place-items: center; overflow: hidden; border: 1px solid #b9c9dc; border-radius: 13px; background: #e5edf6; color: #2466a5; box-shadow: inset 0 0 0 1px #ffffff40; }
+.source-favicon-frame img, .source-favicon-fallback { grid-area: 1 / 1; }
+.source-favicon-frame img { display: block; width: 40px; height: 40px; object-fit: contain; }
+.source-favicon-frame img[hidden], .source-favicon-fallback[hidden] { display: none; }
+.source-favicon-fallback { display: grid; width: 100%; height: 100%; place-items: center; }
+.source-favicon-fallback svg { display: none; width: 27px; height: 27px; fill: none; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
+.source-favicon-fallback[data-kind="web"] .source-favicon-web, .source-favicon-fallback[data-kind="document"] .source-favicon-document { display: block; }
+.source-copy { display: grid; min-width: 0; flex: 1 1 auto; align-content: center; gap: 3px; }
+.active-tab-title { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.active-tab-domain { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.source-status-row { display: flex; min-width: 0; align-items: flex-start; gap: 8px; margin: 7px 0 3px; }
 .source-kind { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-strong); font-size: 9px; font-weight: 650; line-height: 1.2; }
 .source-kind[data-state="restricted"], .source-kind[data-state="local-document"], .source-kind[data-state="tabs-permission-required"] { border-color: #6c5632; background: #312a1d; color: var(--warning); }
 .source-status, .import-status { min-width: 0; margin: 2px 0; color: var(--muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
-.tab-import-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px; margin: 8px 0 0 42px; }
+.tab-import-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px; margin: 8px 0 0; }
 .tab-import-actions button { min-height: 34px; }
 .import-status { margin: 5px 1px 0 43px; white-space: pre-line; }
 .import-status[data-state="loading"] { color: var(--warning); }
@@ -118,27 +123,34 @@ textarea[readonly] { min-height: 96px; max-height: 170px; resize: vertical; back
 .control-button svg rect { fill: currentColor; }
 
 .playback-card { border-color: #355072; background: linear-gradient(150deg, #182a40, #131f2e 60%); }
-.player-heading { margin-bottom: 15px; }
+.player-heading { margin-bottom: 12px; }
+.player-title { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 8px; }
+.player-title-icon { width: 20px; height: 20px; flex: 0 0 20px; color: var(--accent); fill: currentColor; }
 .player-heading h2 { font-size: 15px; }
-.player-heading-meta { display: flex; min-width: 0; align-items: center; gap: 9px; }
-.player-state { overflow: hidden; max-width: 140px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.player-heading-meta { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; justify-content: flex-end; gap: 8px; }
+.player-state { overflow: hidden; max-width: 116px; color: var(--muted); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .player-state[data-state="playing"] { color: var(--success); font-weight: 700; }
-.player-state[data-state="interrupted"] { color: var(--warning); font-weight: 700; }
+.player-state[data-state="generating"], .player-state[data-state="interrupted"] { color: var(--warning); font-weight: 700; }
+.player-state[data-state="audio-ready"] { color: var(--accent-strong); font-weight: 650; }
 .player-state[data-state="error"] { color: var(--error); font-weight: 700; }
 .position { min-width: 40px; color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; color: var(--muted); font-size: 10px; }
+.progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: var(--muted); font-size: 10px; }
 #progress-caption { overflow: hidden; max-width: 65%; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: var(--track); }
+.progress-track { height: 5px; overflow: hidden; border-radius: 999px; background: var(--track); }
 .progress-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .18s linear; }
-.seek-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
-.seek-row time { min-width: 32px; }
-.seek-row time:last-child { text-align: right; }
-#seek { width: 100%; height: 18px; min-width: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.fragment-timeline { min-width: 0; margin-top: 7px; }
+#seek { display: block; width: 100%; height: 18px; min-width: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
 #seek:disabled { cursor: not-allowed; opacity: .56; }
-.duration-summary { min-height: 14px; margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
-.player-controls { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 13px 0 8px; }
-.play-button { min-width: 120px; min-height: 42px; flex: 1 1 auto; border-radius: 11px; font-size: 12px; }
-.play-button svg { width: 17px; height: 17px; }
+.time-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; margin-top: 0; color: var(--muted-strong); font-size: 10px; font-variant-numeric: tabular-nums; line-height: 1.35; }
+.time-row time { min-width: 36px; }
+.time-row time:last-child { text-align: right; }
+.duration-summary { min-height: 14px; margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.player-controls { display: flex; width: 100%; align-items: center; justify-content: center; gap: clamp(5px, 2.2vw, 9px); margin: 11px 0 6px; }
+.player-controls .control-button { width: 40px; height: 40px; flex: 0 0 40px; }
+.player-controls .play-button { width: 46px; min-width: 46px; max-width: 46px; height: 46px; min-height: 46px; flex: 0 0 46px; padding: 0; border: 1px solid #5794df; border-radius: 12px; background: #286fc4; color: #fff; }
+.player-controls .play-button:hover:not(:disabled) { border-color: #9bc6ff; background: #367fcf; }
+.player-controls .play-button:disabled { border-color: #35526f; background: #203a57; color: #a3b1c1; opacity: 1; }
+.player-controls .play-button svg { width: 17px; height: 17px; flex: 0 0 17px; }
 .playback-card audio { display: none; }
 .download-link { display: inline-flex; min-height: 30px; align-items: center; gap: 6px; margin: 1px 0 0 2px; color: var(--accent); font-size: 10px; font-weight: 650; text-decoration: none; }
 .download-link::before { content: ""; width: 13px; height: 13px; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M5 20h14v-2H5v2Zm7-18v10.17l3.59-3.58L17 10l-5 5-5-5 1.41-1.41L11 12.17V2h1Z'/%3E%3C/svg%3E") center / contain no-repeat; }
@@ -146,6 +158,7 @@ textarea[readonly] { min-height: 96px; max-height: 170px; resize: vertical; back
 .playback-status:empty { display: none; }
 
 .voice-heading { margin-bottom: 11px; }
+.voice-heading h2 { margin: 0; font-size: 15px; }
 .state-pill { max-width: 48%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 9px; line-height: 1.25; text-align: right; }
 .state-pill[data-state="ready"], .state-pill[data-state="cached"] { border-color: #2d684d; background: #163427; color: var(--success); }
 .state-pill[data-state="loading"] { border-color: #725c32; background: #342c1d; color: var(--warning); }
@@ -227,10 +240,9 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 
 @media (max-width: 340px) {
   .dropzone-action { display: none; }
-  .source-location, .source-status-row, .tab-import-actions, .import-status { margin-left: 0; }
+  .source-status-row, .tab-import-actions, .import-status { margin-left: 0; }
   .follow-tab-toggle { font-size: 9px; }
   .player-controls { gap: 5px; }
-  .play-button { min-width: 95px; }
   .position { min-width: 34px; }
   .preview-actions button { flex: 1 1 100%; }
 }

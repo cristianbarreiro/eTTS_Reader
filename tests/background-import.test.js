@@ -226,10 +226,81 @@ test("optional follow mode reports the newly active tab and extraction uses that
   } finally { harness.restore(); }
 });
 
+test("the active-tab context includes an authorized browser favicon without triggering extraction or extra permissions", async () => {
+  const faviconUrl = "https://cdn.example.test/site-icon.svg";
+  const harness = await loadBackground({
+    initialTab: { id: 7, windowId: 2, url: "https://example.test/article", title: "Article", favIconUrl: faviconUrl, active: true }
+  });
+  try {
+    const result = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(result.context.favIconUrl, faviconUrl);
+    assert.equal(result.context.title, "Article");
+    assert.equal(harness.calls.scripts.length, 0);
+    assert.equal(harness.calls.permissionRequests.length, 0);
+  } finally { harness.restore(); }
+});
+
+test("a local PDF keeps a readable filename and no stale favicon when the browser has no icon", async () => {
+  const fileUrl = "file:///C:/Users/crist/Documents/Reading/Annual%20Report.pdf";
+  const harness = await loadBackground({
+    initialTab: { id: 7, windowId: 2, url: fileUrl, title: fileUrl, active: true },
+    fileAccessAllowed: false,
+    tabsPermissionGranted: true
+  });
+  try {
+    const result = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(result.context.state, "local-pdf");
+    assert.equal(result.context.title, "Annual Report.pdf");
+    assert.equal(result.context.location, "Annual Report.pdf");
+    assert.equal(result.context.favIconUrl, "");
+    assert.equal(result.context.tabsPermissionGranted, true);
+  } finally { harness.restore(); }
+});
+
+test("a favicon update refreshes the active-tab presentation without starting an import", async () => {
+  const harness = await loadBackground({
+    initialTab: { id: 7, windowId: 2, url: "https://example.test/article", title: "Article", favIconUrl: "https://example.test/old.ico", active: true },
+    tabsPermissionGranted: true
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const previousRevision = enabled.context.faviconRevision;
+    harness.api.tabs.activeTab = { ...harness.api.tabs.activeTab, favIconUrl: "https://cdn.example.test/new.svg" };
+    harness.api.tabs.onUpdated.fire(7, { favIconUrl: "https://cdn.example.test/new.svg" }, harness.api.tabs.activeTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const latest = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(latest.context.favIconUrl, "https://cdn.example.test/new.svg");
+    assert.ok(latest.context.faviconRevision > previousRevision);
+    assert.equal(harness.calls.scripts.length, 0);
+    assert.equal(harness.calls.permissionRequests.length, 0);
+  } finally { harness.restore(); }
+});
+
+test("a title update refreshes visible tab metadata without changing the document or importing text", async () => {
+  const harness = await loadBackground({
+    initialTab: { id: 7, windowId: 2, url: "https://example.test/article", title: "Original title", favIconUrl: "https://example.test/icon.svg", active: true },
+    tabsPermissionGranted: true
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    harness.api.tabs.activeTab = { ...harness.api.tabs.activeTab, title: "Updated title" };
+    harness.api.tabs.onUpdated.fire(7, { title: "Updated title" }, harness.api.tabs.activeTab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const latest = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(latest.context.title, "Updated title");
+    assert.equal(latest.context.documentToken, enabled.context.documentToken);
+    assert.equal(latest.context.favIconUrl, enabled.context.favIconUrl);
+    assert.equal(harness.calls.scripts.length, 0);
+  } finally { harness.restore(); }
+});
+
 test("navigation changes the document token and rejects the previous document context", async () => {
   const harness = await loadBackground({
     tabsPermissionGranted: true,
-    hostPermissions: ["https://example.test/*"]
+    hostPermissions: ["https://example.test/*"],
+    initialTab: { id: 7, windowId: 2, url: "https://example.test/article", title: "Article", favIconUrl: "https://example.test/old.svg", active: true }
   });
   try {
     const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
@@ -242,6 +313,9 @@ test("navigation changes the document token and rejects the previous document co
     assert.equal(result.ok, false);
     assert.equal(result.state, "stale-context");
     assert.equal(harness.calls.scripts.length, 0);
+    const latest = await harness.send({ target: "background", command: "get-active-tab-context" });
+    assert.equal(latest.context.favIconUrl, "", "navigation must not keep showing the previous page icon while the new one loads");
+    assert.ok(latest.context.faviconRevision > previous.faviconRevision);
   } finally { harness.restore(); }
 });
 

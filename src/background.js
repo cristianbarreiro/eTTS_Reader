@@ -1,4 +1,5 @@
 import { classifyTab, extractReadablePage, safeSourceUrl } from "./tab-import.js";
+import { localTabFileName, safeTabTitle } from "./tab-card-presentation.js";
 
 const PANEL_PATH = chrome.runtime.getManifest().side_panel?.default_path || "sidepanel.html";
 const OFFSCREEN_PATH = `${PANEL_PATH.slice(0, PANEL_PATH.lastIndexOf("/") + 1)}offscreen.html`;
@@ -124,18 +125,18 @@ async function savedTabForId(tabId) {
   return target?.tabId === tabId ? target : null;
 }
 
-async function describeActiveTab(tab, { forceNewDocument = false } = {}) {
+async function describeActiveTab(tab, { forceNewDocument = false, faviconChanged = false, faviconSettled = false } = {}) {
   if (!tab?.id) {
     return { state: "waiting", title: "", location: "", contentType: "", accessState: "Esperando selección", availability: "No hay una pestaña activa disponible.", importable: false, tabsPermissionGranted: await hasTabsPermission() };
   }
   const tabsPermissionGranted = await hasTabsPermission();
   const savedTarget = await savedTabForId(tab.id);
   const url = typeof tab.url === "string" && tab.url ? tab.url : savedTarget?.url || "";
-  const title = typeof tab.title === "string" && tab.title ? tab.title : savedTarget?.title || "";
+  const title = safeTabTitle(typeof tab.title === "string" && tab.title ? tab.title : savedTarget?.title || "", url);
   if (!url) {
     return {
       tabId: tab.id, windowId: tab.windowId ?? savedTarget?.windowId ?? null,
-      url: "", title, documentToken: "", state: "tabs-permission-required",
+      url: "", title, favIconUrl: "", faviconPending: false, faviconRevision: 0, documentToken: "", state: "tabs-permission-required",
       location: "Dirección oculta por Edge", contentType: "Pestaña actual",
       accessState: "Permiso de seguimiento requerido",
       availability: "Activa «Seguir pestaña activa» o abre el lector desde esta pestaña.", importable: false,
@@ -151,11 +152,20 @@ async function describeActiveTab(tab, { forceNewDocument = false } = {}) {
 
   const parsed = (() => { try { return new URL(url); } catch { return null; } })();
   const classification = classifyTab({ ...tab, url, title });
+  const faviconPending = forceNewDocument
+    ? true
+    : faviconChanged || faviconSettled ? false : Boolean(previousContext?.faviconPending);
+  const location = parsed?.protocol === "http:" || parsed?.protocol === "https:"
+    ? parsed.host
+    : parsed?.protocol === "file:" ? localTabFileName(url) : parsed?.protocol?.replace(":", "") || "";
   const base = {
     tabId: tab.id, windowId: tab.windowId ?? savedTarget?.windowId ?? null,
-    url, title: title || "Pestaña sin título", documentToken,
+    url, title: title || "Pestaña sin título", location,
+    favIconUrl: faviconPending ? "" : typeof tab.favIconUrl === "string" ? tab.favIconUrl : "",
+    faviconPending,
+    faviconRevision: (previousContext?.faviconRevision || 0) + (forceNewDocument || faviconChanged || faviconSettled ? 1 : 0),
+    documentToken,
     tabsPermissionGranted,
-    location: parsed?.protocol === "http:" || parsed?.protocol === "https:" ? parsed.host : parsed?.protocol === "file:" ? "Archivo local" : parsed?.protocol?.replace(":", "") || "",
     hostPattern: hostPermissionPattern(url),
     contentType: "Página web", accessState: "", availability: "", importable: false
   };
@@ -165,7 +175,7 @@ async function describeActiveTab(tab, { forceNewDocument = false } = {}) {
   }
   if (classification.kind === "local-pdf") {
     const allowed = await isFileSchemeAccessAllowed();
-    return { ...base, state: "local-pdf", location: "PDF local", contentType: "PDF detectado", accessState: allowed ? "Acceso a archivos locales concedido" : allowed === false ? "Permiso de archivo requerido" : "No se pudo comprobar el permiso", availability: allowed ? "Se comprobará el acceso al importar." : "Selecciona el PDF o habilita el acceso a archivos.", importable: allowed === true, sitePermissionGranted: false };
+    return { ...base, state: "local-pdf", contentType: "PDF detectado", accessState: allowed ? "Acceso a archivos locales concedido" : allowed === false ? "Permiso de archivo requerido" : "No se pudo comprobar el permiso", availability: allowed ? "Se comprobará el acceso al importar." : "Selecciona el PDF o habilita el acceso a archivos.", importable: allowed === true, sitePermissionGranted: false };
   }
   if (classification.kind === "pdf") base.contentType = "PDF detectado";
   else if (classification.kind === "google-docs") base.contentType = "Google Docs";
@@ -221,12 +231,12 @@ async function refreshActiveTabContext({ windowId = null, forceNewDocument = fal
   return commitActiveTabContext(tab, { forceNewDocument }, requestSequence);
 }
 
-async function refreshContextForTab(tabId, windowId, { forceNewDocument = false } = {}) {
+async function refreshContextForTab(tabId, windowId, { forceNewDocument = false, faviconChanged = false, faviconSettled = false } = {}) {
   const requestSequence = ++contextRequestSequence;
   let tab = null;
   try { tab = await chrome.tabs.get(tabId); } catch { /* The tab may have closed before the event was handled. */ }
   if (tab?.windowId !== undefined && windowId !== undefined && tab.windowId !== windowId) return activeTabContext;
-  return commitActiveTabContext(tab, { forceNewDocument }, requestSequence);
+  return commitActiveTabContext(tab, { forceNewDocument, faviconChanged, faviconSettled }, requestSequence);
 }
 
 async function hasTabsPermission() {
@@ -614,8 +624,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const sameWindow = followActiveTab
     ? tab?.windowId === followWindowId
     : tab?.windowId === activeTabContext?.windowId;
-  if (sameWindow && tab?.active && (changeInfo.title || changeInfo.status === "complete")) {
-    void refreshContextForTab(tabId, tab.windowId);
+  const hasFaviconUpdate = Object.prototype.hasOwnProperty.call(changeInfo, "favIconUrl");
+  if (sameWindow && tab?.active && (changeInfo.title || hasFaviconUpdate || changeInfo.status === "complete")) {
+    void refreshContextForTab(tabId, tab.windowId, {
+      faviconChanged: hasFaviconUpdate,
+      faviconSettled: changeInfo.status === "complete"
+    });
   }
 });
 

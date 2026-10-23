@@ -10,6 +10,8 @@ import { getVoiceProvider, isSystemVoiceId, voiceSessionFields } from "./voice-c
 import { SystemSpeechProvider } from "./system-speech.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
+import { kokoroEngineLabel, playerHeaderState, readingProgressCaption } from "./player-presentation.js";
+import { createTabFaviconPresenter, safeTabTitle } from "./tab-card-presentation.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
@@ -19,6 +21,7 @@ const ui = {
   libraryStatus: $("#library-status"),
   appAlert: $("#app-alert"), appAlertMessage: $("#app-alert-message"), errorDetails: $("#app-error-details"), errorTechnical: $("#app-error-technical"), dismissAppAlert: $("#dismiss-app-alert"),
   sourceCard: $("#source-card"), activeTabKind: $("#active-tab-kind"), activeTabDomain: $("#active-tab-domain"),
+  activeTabFavicon: $("#active-tab-favicon"), activeTabFaviconFallback: $("#active-tab-favicon-fallback"),
   importTab: $("#import-tab"), importSelection: $("#import-selection"), importStatus: $("#tab-import-status"),
   followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
@@ -34,6 +37,7 @@ const ui = {
 };
 
 const repository = new ReaderRepository();
+const presentTabFavicon = createTabFaviconPresenter(ui.activeTabFavicon, ui.activeTabFaviconFallback);
 let modelState = "idle";
 let initializationPromise = null;
 let currentDocument = null;
@@ -128,7 +132,7 @@ function updateVoiceProviderUI() {
     ui.install.disabled = true;
     return;
   }
-  ui.engineState.textContent = modelLabel();
+  ui.engineState.textContent = kokoroEngineLabel(modelState);
   ui.engineState.dataset.state = modelState;
   ui.voiceNote.textContent = "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
   ui.privacyNote.textContent = "Con Kokoro, el texto se sintetiza localmente; la red solo se usa para descargar los pesos solicitados.";
@@ -152,43 +156,27 @@ function modelLabel() {
   })[modelState] || "Modelo local";
 }
 
-function playerLabel(snapshot) {
-  if (!snapshot.chunks.length && snapshot.activeKind !== "preview") return "Sin texto";
-  if (snapshot.activeKind === "preview") {
-    if (snapshot.status === "playing") return "Reproduciendo muestra";
-    if (snapshot.status === "paused") return "Muestra pausada";
-    if (snapshot.status === "completed") return "Muestra completada";
-  }
-  if (["text-ready", "stopped"].includes(snapshot.status) && !readerControls(snapshot).canPlay) {
-    return isSystemVoiceId(ui.voice.value) ? "Voz del sistema no disponible" : modelLabel();
-  }
-  return ({
-    "text-ready": "Texto preparado",
-    generating: "Generando audio",
-    "audio-ready": "Audio preparado",
-    playing: "Reproduciendo en segundo plano",
-    paused: "Pausado",
-    interrupted: "Lectura interrumpida",
-    stopped: "Detenido",
-    completed: "Lectura completada",
-    error: "Error recuperable"
-  })[snapshot.status] || "Sin texto";
-}
-
 function describePlayer(snapshot) {
   if (snapshot.status === "playing") {
     if (snapshot.activeProvider === "speechSynthesis") return snapshot.activeKind === "preview"
-      ? "Reproduciendo una muestra con Edge/Windows. El sistema puede procesar el texto; esta voz no genera un WAV descargable."
-      : `Reproduciendo con Edge/Windows, fragmento ${(snapshot.playingIndex ?? snapshot.selectedIndex) + 1} de ${snapshot.chunks.length}. El sistema puede procesar el texto.`;
-    if (snapshot.activeKind === "preview") return "Reproduciendo la muestra de voz local.";
-    return `Reproduciendo fragmento ${(snapshot.playingIndex ?? snapshot.selectedIndex) + 1} de ${snapshot.chunks.length}.`;
+      ? "Muestra de Edge/Windows; no genera un WAV descargable."
+      : "Voz del sistema; no ofrece duración exacta ni un WAV descargable.";
+    if (snapshot.activeKind === "preview") return "Muestra de voz local; la lectura del documento no cambia.";
+    return "Audio WAV local del fragmento actual.";
   }
-  if (snapshot.status === "paused" && snapshot.activeProvider === "speechSynthesis") return "Voz del sistema pausada; la posición temporal exacta no está disponible.";
-  if (snapshot.status === "paused") return snapshot.activeKind === "preview"
-    ? `Muestra pausada en ${formatTime(snapshot.currentTime)}.`
-    : `Lectura pausada en ${formatTime(snapshot.currentTime)} del fragmento ${snapshot.selectedIndex + 1}.`;
+  if (snapshot.status === "generating") return snapshot.activeKind === "preview"
+    ? "Preparando una muestra local de voz."
+    : `Síntesis del fragmento ${snapshot.selectedIndex + 1} de ${snapshot.chunks.length} en curso.`;
+  if (snapshot.status === "audio-ready") return snapshot.activeKind === "preview"
+    ? "La muestra local está lista para reproducirse."
+    : "El audio del fragmento está listo para reproducirse o descargarse.";
+  if (snapshot.status === "paused" && snapshot.activeProvider === "speechSynthesis") return "La voz del sistema no ofrece una posición temporal exacta.";
+  if (snapshot.status === "paused") return `Posición conservada en ${formatTime(snapshot.currentTime)}.`;
   if (snapshot.status === "interrupted") return snapshot.message || "La sesión se guardó. Pulsa Reanudar para continuar.";
   if (snapshot.status === "error") return userFacingErrorMessage(snapshot.message, "playback");
+  if (snapshot.status === "completed") return snapshot.activeKind === "preview"
+    ? "La muestra terminó y puede volver a probarse."
+    : "Pulsa Reproducir para comenzar desde el principio.";
   return snapshot.message;
 }
 
@@ -200,37 +188,36 @@ function renderPlayer(snapshot) {
   const selected = hasText ? snapshot.selectedIndex + 1 : 0;
   const isPlaying = snapshot.status === "playing";
   const isGenerating = snapshot.status === "generating";
+  const activeProvider = snapshot.activeProvider || getVoiceProvider(ui.voice.value);
+  const usesSystemSpeech = activeProvider === "speechSynthesis";
 
   ui.position.textContent = `${selected} / ${chunkCount}`;
   ui.position.setAttribute("aria-label", `Fragmento ${selected} de ${chunkCount}`);
-  ui.playerState.textContent = playerLabel(snapshot);
+  const headerState = playerHeaderState(snapshot.status);
+  ui.playerState.textContent = headerState;
+  ui.playerState.hidden = !headerState;
   ui.playerState.dataset.state = snapshot.status;
 
   const progress = Number.isFinite(snapshot.totalProgress) ? snapshot.totalProgress : 0;
   ui.progressFill.style.width = `${Math.round(progress * 100)}%`;
   ui.progress.setAttribute("aria-valuenow", String(Math.round(progress * 100)));
-  const progressText = snapshot.activeProvider === "speechSynthesis" && snapshot.activeKind !== "preview"
-    ? `Progreso aproximado por texto · ${Math.round(progress * 100)}% · sin búsqueda temporal`
-    : snapshot.activeKind === "preview" ? "Muestra de voz · la lectura no cambia"
-    : snapshot.totalDuration !== null
-    ? `Progreso temporal · ${Math.round(progress * 100)}%`
-    : hasText ? `${selected} de ${chunkCount} fragmentos · duración total pendiente` : "Sin progreso";
+  const progressText = readingProgressCaption({ ...snapshot, activeProvider });
   ui.progress.setAttribute("aria-valuetext", progressText);
   ui.progressCaption.textContent = progressText;
 
-  ui.elapsed.textContent = snapshot.activeProvider === "speechSynthesis" ? "—" : formatTime(snapshot.currentTime);
-  ui.duration.textContent = snapshot.activeProvider === "speechSynthesis" ? "—" : formatTime(snapshot.duration ?? Number.NaN);
+  ui.elapsed.textContent = usesSystemSpeech ? "—" : formatTime(snapshot.currentTime);
+  ui.duration.textContent = usesSystemSpeech ? "—" : formatTime(snapshot.duration ?? Number.NaN);
   ui.seek.min = "0";
-  ui.seek.max = String(snapshot.duration || 0);
+  ui.seek.max = String(usesSystemSpeech ? 0 : snapshot.duration || 0);
   ui.seek.step = "0.1";
-  ui.seek.value = String(Math.min(snapshot.currentTime, snapshot.duration || 0));
-  ui.seek.disabled = !Number.isFinite(snapshot.duration) || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
-  ui.seek.setAttribute("aria-valuetext", snapshot.activeProvider === "speechSynthesis"
+  ui.seek.value = String(usesSystemSpeech ? 0 : Math.min(snapshot.currentTime, snapshot.duration || 0));
+  ui.seek.disabled = usesSystemSpeech || !Number.isFinite(snapshot.duration) || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
+  ui.seek.setAttribute("aria-valuetext", usesSystemSpeech
     ? "La voz del sistema no informa posición temporal para buscar."
     : `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
 
   const knownSeconds = snapshot.durations.reduce((sum, duration) => sum + (Number.isFinite(duration) ? duration : 0), 0);
-  ui.durationSummary.textContent = snapshot.activeProvider === "speechSynthesis"
+  ui.durationSummary.textContent = usesSystemSpeech
     ? "La duración y la búsqueda temporal no están disponibles para voces del sistema."
     : snapshot.activeKind === "preview" ? `Duración de la muestra ${formatTime(snapshot.duration)}`
     : snapshot.totalDuration !== null
@@ -243,9 +230,6 @@ function renderPlayer(snapshot) {
   const canResumePreview = snapshot.activeKind === "preview" && ["paused", "completed"].includes(snapshot.status) && controls.canTestVoice;
   ui.play.disabled = (!controls.canPlay && !canResumePreview) || isGenerating;
   ui.pause.disabled = !controls.canPause;
-  const playLabel = snapshot.status === "paused" || snapshot.status === "interrupted" ? "Reanudar"
-    : snapshot.status === "completed" ? "Reproducir de nuevo" : "Reproducir";
-  ui.play.querySelector("span").textContent = playLabel;
   ui.play.setAttribute("aria-label", snapshot.status === "paused" || snapshot.status === "interrupted" ? "Reanudar lectura"
     : snapshot.status === "completed" ? "Reproducir lectura desde el principio" : "Reproducir lectura");
   ui.stop.disabled = !(hasText || snapshot.activeKind === "preview") || !["playing", "paused", "generating", "audio-ready", "completed", "interrupted", "error"].includes(snapshot.status);
@@ -652,8 +636,11 @@ function applyActiveTabContext(context, following) {
   const presentation = panelStatus.setTabContext(context).tab;
   ui.sourceCard.dataset.state = presentation.state;
   ui.activeTabTitle.textContent = presentation.title;
+  ui.activeTabTitle.title = safeTabTitle(presentation.title, context?.url || "");
   ui.activeTabDomain.textContent = presentation.domain;
   ui.activeTabDomain.hidden = !presentation.domain;
+  ui.activeTabDomain.title = presentation.domain;
+  presentTabFavicon(context);
   ui.activeTabKind.textContent = presentation.contentType;
   ui.activeTabKind.dataset.state = presentation.state;
   ui.activeTabStatus.textContent = presentation.status;

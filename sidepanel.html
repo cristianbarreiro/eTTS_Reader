@@ -42,18 +42,21 @@
 
     <section id="source-card" class="source-card" data-state="waiting" aria-labelledby="active-tab-heading">
       <div class="source-header">
-        <div class="source-identity">
-          <span class="source-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.75h7l4.25 4.5v12H7zM14 4v5h4M9.5 13h6M9.5 16h6" /></svg></span>
-          <div class="source-copy">
-            <p class="section-kicker">ORIGEN</p>
-            <h2 id="active-tab-heading">Pestaña actual</h2>
-          </div>
-        </div>
+        <h2 id="active-tab-heading">Pestaña actual</h2>
         <label class="follow-tab-toggle"><input id="follow-active-tab" type="checkbox"> <span>Seguir pestaña</span></label>
       </div>
-      <div class="source-location">
-        <strong id="active-tab-title" class="active-tab-title">Abre el lector desde la pestaña que quieras importar.</strong>
-        <span id="active-tab-domain" class="active-tab-domain"></span>
+      <div class="source-tab-details">
+        <span id="active-tab-favicon-frame" class="source-favicon-frame" aria-hidden="true">
+          <img id="active-tab-favicon" alt="" hidden>
+          <span id="active-tab-favicon-fallback" class="source-favicon-fallback" data-kind="web">
+            <svg class="source-favicon-web" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="M3.8 12h16.4M12 3.5c2.3 2.3 3.4 5.1 3.4 8.5s-1.1 6.2-3.4 8.5c-2.3-2.3-3.4-5.1-3.4-8.5s1.1-6.2 3.4-8.5z" /></svg>
+            <svg class="source-favicon-document" viewBox="0 0 24 24"><path d="M6.5 3.75h7L18 8.3v12H6.5zM13.5 4v5H18M9 13h6M9 16h6" /></svg>
+          </span>
+        </span>
+        <div class="source-copy">
+          <strong id="active-tab-title" class="active-tab-title">Abre el lector desde la pestaña que quieras importar.</strong>
+          <span id="active-tab-domain" class="active-tab-domain" hidden></span>
+        </div>
       </div>
       <div class="source-status-row">
         <span id="active-tab-kind" class="source-kind" data-state="waiting">Esperando una página</span>
@@ -82,21 +85,20 @@
 
     <section class="card playback-card" aria-labelledby="playback-heading">
       <div class="player-heading">
-        <div><p class="section-kicker">LECTURA</p><h2 id="playback-heading">Reproductor</h2></div>
-        <div class="player-heading-meta"><span id="player-state" class="player-state" data-state="empty">Sin texto</span><span id="position" class="position" aria-label="Fragmento 0 de 0">0 / 0</span></div>
+        <div class="player-title"><svg class="player-title-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 12 7-12 7z" /></svg><h2 id="playback-heading">Reproductor</h2></div>
+        <div class="player-heading-meta"><span id="player-state" class="player-state" data-state="empty" hidden></span><span id="position" class="position" aria-label="Fragmento 0 de 0">0 / 0</span></div>
       </div>
       <div class="progress-heading"><span>Progreso de lectura</span><span id="progress-caption">Sin progreso</span></div>
       <div id="read-progress" class="progress-track" role="progressbar" aria-label="Progreso de lectura por fragmentos" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Sin progreso"><span id="read-progress-fill"></span></div>
-      <div class="seek-row">
-        <time id="elapsed" aria-label="Tiempo transcurrido">0:00</time>
+      <div class="fragment-timeline" aria-label="Progreso del fragmento actual">
         <input id="seek" type="range" min="0" max="0" step="0.1" value="0" aria-label="Buscar en el fragmento actual" aria-valuetext="Duración todavía desconocida" disabled>
-        <time id="duration" aria-label="Duración del fragmento">--:--</time>
+        <div class="time-row"><time id="elapsed" aria-label="Tiempo transcurrido">0:00</time><time id="duration" aria-label="Duración del fragmento">--:--</time></div>
       </div>
       <p id="duration-summary" class="duration-summary">La duración aparecerá cuando se genere audio.</p>
       <div class="player-controls" role="group" aria-label="Controles de reproducción">
         <button id="previous" class="control-button" title="Fragmento anterior" aria-label="Ir al fragmento anterior" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 6 9 12l10 6z" /></svg></button>
-        <button id="play" class="primary-button play-button" aria-label="Reproducir lectura" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 12 7-12 7z" /></svg><span>Reproducir</span></button>
-        <button id="pause" class="primary-button play-button" aria-label="Pausar lectura" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3v14H8zM15 5h3v14h-3z" /></svg><span>Pausar</span></button>
+        <button id="play" class="primary-button play-button" aria-label="Reproducir lectura" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 12 7-12 7z" /></svg></button>
+        <button id="pause" class="primary-button play-button" aria-label="Pausar lectura" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3v14H8zM15 5h3v14h-3z" /></svg></button>
         <button id="stop" class="control-button" title="Detener y volver al inicio" aria-label="Detener y volver al primer fragmento" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1" /></svg></button>
         <button id="next" class="control-button" title="Fragmento siguiente" aria-label="Ir al fragmento siguiente" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 6l10 6-10 6z" /></svg></button>
       </div>
@@ -106,7 +108,7 @@
 
     <section class="card voice-card" aria-labelledby="voice-heading">
       <div class="section-heading voice-heading">
-        <div><p class="section-kicker">PROVEEDOR DE VOZ</p><h2 id="voice-heading">Voz</h2></div>
+        <h2 id="voice-heading">Voz</h2>
         <span id="engine-state" class="state-pill" data-state="idle">Modelo sin descargar</span>
       </div>
       <div class="voice-grid">
