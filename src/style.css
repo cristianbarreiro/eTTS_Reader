@@ -80,12 +80,18 @@ textarea { display: block; width: 100%; min-height: 112px; max-height: 180px; re
 .library-group > .hint { margin: 4px 0 10px; }
 .library-list { display: grid; gap: 8px; }
 .library-empty { padding: 9px; margin: 0; border: 1px dashed var(--border); border-radius: 8px; }
-.library-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.library-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .library-entry[data-active="true"] { border-color: var(--accent); background: var(--accent-soft); }
-.library-entry-content { display: grid; gap: 4px; min-width: 0; }
+.library-entry-content { display: grid; flex: 1 1 170px; gap: 4px; min-width: 0; }
 .library-entry-title { overflow-wrap: anywhere; font-size: 11px; line-height: 1.35; }
 .library-entry-meta { color: var(--muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
 .library-entry-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+.library-session-details { flex: 1 0 100%; width: 100%; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.library-session-details > summary { cursor: pointer; width: fit-content; }
+.library-session-list { display: grid; gap: 6px; margin-top: 7px; }
+.library-session-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px; border-radius: 7px; background: var(--surface-raised, var(--surface)); }
+.library-session-row > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.library-continue { border-color: var(--accent); }
 .library-open { min-height: 36px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface-muted); font-size: 10px; cursor: pointer; }
 .library-delete { display: grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 8px; color: var(--danger, #a12b33); background: var(--surface); cursor: pointer; }
 .library-delete svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }

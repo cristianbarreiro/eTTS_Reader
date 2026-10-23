@@ -118,6 +118,55 @@ test("IndexedDB repository saves and restores pasted or extracted document text 
   assert.equal(session.lastError, "");
 });
 
+test("documents reject empty and whitespace-only text while preserving a saved document on an empty edit", async () => {
+  const repository = makeRepository();
+  await assert.rejects(repository.saveDocument({ name: "vacío", text: "" }), /documento vacío/);
+  await assert.rejects(repository.saveDocument({ name: "espacios", text: " \n\t " }), /documento vacío/);
+  assert.deepEqual(await repository.listDocuments(), []);
+
+  const saved = await repository.saveDocument({ name: "válido.txt", text: "  Texto conservado  " });
+  const emptyEdit = await repository.saveDocument({ ...saved, text: "   " });
+  assert.equal(emptyEdit.text, "  Texto conservado  ");
+  assert.equal((await repository.getDocument(saved.id)).text, "  Texto conservado  ");
+});
+
+test("empty legacy document cleanup detaches and preserves sessions and audio without deleting recoverable data", async () => {
+  const repository = makeRepository();
+  const session = await repository.saveSession({
+    id: "recoverable-session", documentId: "legacy-empty", sourceDocumentName: "legacy.txt",
+    sourceText: "Lectura guardada.", chunks: ["Lectura guardada."], status: "paused", audioKeys: ["kept-audio"]
+  });
+  const blob = new Blob(["audio"], { type: "audio/wav" });
+  await repository.saveAudioChunk({ id: "kept-audio", blob });
+  await repository._write("documents", (store) => store.put({ id: "legacy-empty", name: "legacy.txt", text: " \t ", updatedAt: 1 }));
+  await repository._write("documents", (store) => store.put({ id: "valid-doc", name: "valid.txt", text: "Conservar", updatedAt: 2 }));
+
+  const documents = await repository.listDocuments();
+  const detached = await repository.getSession(session.id);
+  assert.deepEqual(documents.map(({ id }) => id), ["valid-doc"]);
+  assert.equal(await repository.getDocument("legacy-empty"), undefined);
+  assert.equal(detached.documentId, null);
+  assert.equal(detached.sourceText, "Lectura guardada.");
+  assert.equal(detached.status, "paused");
+  assert.deepEqual(detached.audioKeys, ["kept-audio"]);
+  assert.equal((await repository.getAudioChunk("kept-audio")).blob.size, blob.size);
+
+  await repository.cleanEmptyDocuments();
+  assert.ok(await repository.getSession(session.id));
+  assert.ok(await repository.getAudioChunk("kept-audio"));
+});
+
+test("a document save already in flight cannot recreate an explicitly deleted identifier", async () => {
+  const repository = makeRepository();
+  const saving = repository.saveDocument({ id: "delete-race", name: "race.txt", text: "Contenido válido" });
+  const deleting = repository.deleteDocument("delete-race");
+  const [saveResult, deleteResult] = await Promise.allSettled([saving, deleting]);
+  assert.equal(saveResult.status, "rejected");
+  assert.match(saveResult.reason.message, /eliminado/);
+  assert.equal(deleteResult.status, "fulfilled");
+  assert.equal(await repository.getDocument("delete-race"), undefined);
+});
+
 test("session persistence retains failed chunk state and its retryable error", async () => {
   const repository = makeRepository();
   const saved = await repository.saveSession({

@@ -34,6 +34,8 @@ export class ReaderRepository {
     this.indexedDB = indexedDB;
     this.storage = storage;
     this.databasePromise = null;
+    this.emptyDocumentCleanupPromise = null;
+    this.deletedDocumentIds = new Set();
   }
 
   open() {
@@ -89,23 +91,76 @@ export class ReaderRepository {
   async getDocument(id) { return this._read("documents", (store) => store.get(id)); }
 
   async listDocuments() {
+    await this.cleanEmptyDocuments();
     const records = await this._read("documents", (store) => store.getAll());
-    return records.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return records.filter((record) => String(record.text ?? "").trim()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  async cleanEmptyDocuments() {
+    if (this.emptyDocumentCleanupPromise) return this.emptyDocumentCleanupPromise;
+    this.emptyDocumentCleanupPromise = (async () => {
+      const db = await this.open();
+      const transaction = db.transaction(["documents", "sessions"], "readwrite");
+      const documents = transaction.objectStore("documents");
+      const sessions = transaction.objectStore("sessions");
+      const completion = transactionResult(transaction);
+      let documentRecords;
+      let sessionRecords;
+      let documentsRead = false;
+      let sessionsRead = false;
+      const cleanup = () => {
+        if (!documentsRead || !sessionsRead) return;
+        const records = documentRecords.filter((document) => !String(document.text ?? "").trim());
+        for (const document of records) {
+          const now = Date.now();
+          for (const session of sessionRecords) {
+            if (session.documentId !== document.id) continue;
+            sessions.put({
+              ...session,
+              documentId: null,
+              sourceDocumentName: session.sourceDocumentName || document.name || "Documento eliminado",
+              sourceText: String(session.sourceText ?? "") || String(document.text ?? ""),
+              documentDeletedAt: now,
+              updatedAt: session.updatedAt || now
+            });
+          }
+          this.deletedDocumentIds.add(document.id);
+          documents.delete(document.id);
+        }
+      };
+      const documentRequest = documents.getAll();
+      documentRequest.onsuccess = () => { documentRecords = documentRequest.result || []; documentsRead = true; cleanup(); };
+      const sessionRequest = sessions.getAll();
+      sessionRequest.onsuccess = () => { sessionRecords = sessionRequest.result || []; sessionsRead = true; cleanup(); };
+      await completion;
+    })().catch((error) => {
+      this.emptyDocumentCleanupPromise = null;
+      throw error;
+    });
+    return this.emptyDocumentCleanupPromise;
   }
 
   async saveDocument(document) {
+    const documentId = document.id || makeId("document");
+    if (this.deletedDocumentIds.has(documentId)) throw new Error("Este documento fue eliminado y no puede volver a guardarse con el mismo identificador.");
     const previous = document.id ? await this.getDocument(document.id) : null;
+    const text = String(document.text ?? "");
+    if (!text.trim()) {
+      if (previous && String(previous.text ?? "").trim()) return previous;
+      throw new TypeError("No se puede guardar un documento vacío o compuesto solo por espacios.");
+    }
     const now = Date.now();
     const record = {
       ...document,
-      id: document.id || makeId("document"),
+      id: documentId,
       name: document.name || "Texto pegado",
       type: document.type || "text",
-      text: String(document.text ?? ""),
+      text,
       createdAt: previous?.createdAt || document.createdAt || now,
       updatedAt: now,
       extractionStatus: document.extractionStatus || "ready"
     };
+    if (this.deletedDocumentIds.has(record.id)) throw new Error("Este documento fue eliminado y no puede volver a guardarse con el mismo identificador.");
     await this._write("documents", (store) => store.put(record));
     return record;
   }
@@ -181,6 +236,7 @@ export class ReaderRepository {
   }
 
   async deleteDocument(id) {
+    this.deletedDocumentIds.add(id);
     const db = await this.open();
     const transaction = db.transaction(["documents", "sessions"], "readwrite");
     const documents = transaction.objectStore("documents");

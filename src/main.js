@@ -3,6 +3,8 @@ import { splitText } from "./text.js";
 import { formatTime } from "./audio-utils.js";
 import { attemptInitialization, deriveReaderControls } from "./reader-state.js";
 import { makeId, ReaderRepository } from "./persistence.js";
+import { persistEditorSnapshot } from "./editor-persistence.js";
+import { buildLibraryEntries, libraryActionFor, openLibraryEntry, resumeLibrarySession } from "./library.js";
 import { ReaderClient } from "./reader-client.js";
 import { KokoroWorkerClient } from "./tts-worker-client.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
@@ -11,8 +13,8 @@ const $ = (selector) => document.querySelector(selector);
 const ui = {
   text: $("#text-input"), count: $("#count"), chunks: $("#chunk-count"), file: $("#document-file"),
   fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
-  library: $("#library-details"), librarySummary: $("#library-summary-count"), documentsList: $("#documents-list"),
-  sessionsList: $("#sessions-list"), libraryStatus: $("#library-status"),
+  library: $("#library-details"), librarySummary: $("#library-summary-count"), libraryList: $("#library-list"),
+  libraryStatus: $("#library-status"),
   importTab: $("#import-tab"), importSelection: $("#import-selection"), importStatus: $("#tab-import-status"),
   followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
@@ -248,6 +250,7 @@ function updateTextInfo() {
   ui.chunks.textContent = `${segments.length} ${segments.length === 1 ? "fragmento" : "fragmentos"}`;
   if (!currentSession || currentSession.sourceText !== text) {
     const liveStatus = player.snapshot().status;
+    const stopEmptyingRead = !segments.length && ["playing", "generating", "audio-ready"].includes(liveStatus);
     if (currentSession && !editingForked
         && (currentSession.status !== "text-ready" || currentSession.audioKeys?.some(Boolean)
           || ["playing", "paused", "interrupted", "completed", "error"].includes(liveStatus)
@@ -275,6 +278,7 @@ function updateTextInfo() {
       };
     }
     player.setSession(currentSession);
+    if (stopEmptyingRead) void player.stop().catch(showError);
     if (hydrationComplete) queuePersistence(true);
   }
 }
@@ -287,10 +291,18 @@ function queuePersistence(replaceQueue = false) {
 
 function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
   clearTimeout(persistTimer);
-  if (!currentDocument || !currentSession) return persistenceChain;
-  const documentDraft = { ...currentDocument, text: ui.text.value, extractionStatus: "ready" };
+  const text = ui.text.value;
+  // An empty editor is an unsaved draft. It must never overwrite a saved
+  // document or enqueue an empty session, but earlier valid writes still drain.
+  if (!text.trim()) return persistenceChain;
+  if (!currentDocument) currentDocument = { id: makeId("document"), name: "Texto pegado", type: "text" };
+  if (!currentSession) currentSession = { id: makeId("session"), documentId: currentDocument.id, audioKeys: [] };
+  if (!currentSession.id) currentSession = { ...currentSession, id: makeId("session") };
+  const documentDraft = { ...currentDocument, text, extractionStatus: "ready" };
   const sessionDraft = {
     ...currentSession,
+    id: currentSession.id || makeId("session"),
+    documentId: currentDocument.id,
     sourceText: ui.text.value,
     sourceDocumentName: currentDocument.name || currentSession.sourceDocumentName || "Texto pegado",
     chunks: splitText(ui.text.value),
@@ -300,8 +312,12 @@ function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
   const generation = selectionEpoch;
   persistenceChain = persistenceChain.then(async () => {
     if (generation !== selectionEpoch || currentDocument?.id !== documentDraft.id || currentSession?.id !== sessionDraft.id) return;
-    currentDocument = await repository.saveDocument(documentDraft);
-    currentSession = await repository.saveSession(sessionDraft);
+    const saved = await persistEditorSnapshot(repository, {
+      document: documentDraft, session: sessionDraft, text: documentDraft.text,
+      voice: sessionDraft.voice, speed: sessionDraft.speed
+    });
+    currentDocument = saved.document;
+    currentSession = saved.session;
     await chrome.storage.local.set({ lastDocumentId: currentDocument.id, lastSessionId: currentSession.id });
     if (replaceQueue) {
       await player.replace(currentSession).catch((error) => {
@@ -324,25 +340,26 @@ async function refreshLibrary() {
   if (requestId !== libraryRefreshEpoch || !ui.library.open) return;
   savedDocuments = documents;
   savedSessions = sessions;
-  const documentsById = new Map(savedDocuments.map((item) => [item.id, item]));
-  const list = (node, entries, emptyText, createEntry) => {
-    node.replaceChildren();
-    if (!entries.length) {
-      const empty = document.createElement("p");
-      empty.className = "library-empty hint";
-      empty.textContent = emptyText;
-      node.append(empty);
-      return;
-    }
-    for (const entry of entries) node.append(createEntry(entry));
-  };
+  const entries = buildLibraryEntries(savedDocuments, savedSessions);
+  ui.libraryList.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "library-empty hint";
+    empty.textContent = "Todavía no hay documentos guardados.";
+    ui.libraryList.append(empty);
+  }
   const dateText = (value) => value ? new Date(value).toLocaleDateString("es-UY", { day: "2-digit", month: "2-digit", year: "numeric" }) : "fecha desconocida";
   const typeText = (type) => ({
     text: "Texto pegado", pdf: "PDF", docx: "DOCX", txt: "TXT", md: "Markdown", markdown: "Markdown",
     article: "Artículo web", "main-content": "Página web", "web-page": "Página web", "google-docs-visible": "Google Docs · páginas visibles",
     selection: "Selección web", combined: "Texto combinado", recovered: "Texto recuperado"
   })[type] || String(type || "Documento").toUpperCase();
-  const entryCard = ({ title, detail, active, openLabel, deleteLabel, onOpen, onDelete }) => {
+  const sessionState = (status) => ({
+    playing: "en reproducción", generating: "generando audio", "audio-ready": "audio listo", paused: "pausada",
+    interrupted: "interrumpida", completed: "completada", error: "con error", stopped: "detenida", "text-ready": "lista para leer", empty: "vacía"
+  })[status] || "guardada";
+  const voiceName = (voice) => [...ui.voice.options].find((option) => option.value === voice)?.textContent?.trim() || voice || "voz predeterminada";
+  const entryCard = ({ title, detail, active, openLabel, continueLabel, deleteLabel, onOpen, onContinue, onDelete, sessions: entrySessions }) => {
     const card = document.createElement("article");
     card.className = "library-entry";
     card.setAttribute("role", "listitem");
@@ -363,6 +380,11 @@ async function refreshLibrary() {
     open.className = "library-open";
     open.textContent = openLabel;
     open.addEventListener("click", onOpen);
+    const proceed = document.createElement("button");
+    proceed.type = "button";
+    proceed.className = "library-open library-continue";
+    proceed.textContent = continueLabel;
+    proceed.addEventListener("click", onContinue);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "library-delete";
@@ -370,44 +392,96 @@ async function refreshLibrary() {
     remove.setAttribute("aria-label", deleteLabel);
     remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
     remove.addEventListener("click", onDelete);
-    actions.append(open, remove);
+    actions.append(open, proceed, remove);
     card.append(content, actions);
+
+    if (entrySessions.length) {
+      const details = document.createElement("details");
+      details.className = "library-session-details";
+      const summary = document.createElement("summary");
+      summary.textContent = entrySessions.length === 1 ? "Detalles de lectura" : `${entrySessions.length} sesiones de lectura`;
+      const sessionList = document.createElement("div");
+      sessionList.className = "library-session-list";
+      sessionList.setAttribute("role", "list");
+      for (const session of entrySessions) {
+        const sessionRow = document.createElement("div");
+        sessionRow.className = "library-session-row";
+        sessionRow.setAttribute("role", "listitem");
+        const sessionMeta = document.createElement("span");
+        const chunkCount = session.chunks?.length || 0;
+        const fragment = chunkCount ? Math.min((session.selectedIndex || 0) + 1, chunkCount) : 0;
+        const speed = `${Number(session.speed || 1).toLocaleString("es-UY", { maximumFractionDigits: 2 })}×`;
+        sessionMeta.textContent = `${dateText(session.updatedAt || session.createdAt)} · ${sessionState(session.status)} · ${voiceName(session.voice)} · ${speed} · fragmento ${fragment}/${chunkCount} · ${formatTime(Number(session.position) || 0)}`;
+        const sessionActions = document.createElement("div");
+        sessionActions.className = "library-entry-actions";
+        const resume = document.createElement("button");
+        resume.type = "button";
+        resume.className = "library-open";
+        resume.textContent = "Reanudar";
+        resume.addEventListener("click", () => { if (!libraryMutationBusy) void resumeLibrarySession(session, activateSession, () => player.play()).catch(showError); });
+        const deleteSession = document.createElement("button");
+        deleteSession.type = "button";
+        deleteSession.className = "library-delete";
+        const sessionName = session.sourceDocumentName || title;
+        deleteSession.title = `Eliminar sesión de lectura ${sessionName}`;
+        deleteSession.setAttribute("aria-label", `Eliminar sesión de lectura ${sessionName}`);
+        deleteSession.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
+        deleteSession.addEventListener("click", () => { void deleteLibrarySession(session.id); });
+        sessionActions.append(resume, deleteSession);
+        sessionRow.append(sessionMeta, sessionActions);
+        sessionList.append(sessionRow);
+      }
+      details.append(summary, sessionList);
+      card.append(details);
+    }
     return card;
   };
 
-  list(ui.documentsList, savedDocuments, "Todavía no hay documentos guardados.", (saved) => {
-    const active = saved.id === currentDocument?.id;
-    const characters = Number(saved.characterCount ?? saved.text?.length ?? 0).toLocaleString();
-    return entryCard({
-      title: saved.name || "Documento sin título",
-      detail: `${typeText(saved.type)} · ${dateText(saved.updatedAt || saved.importedAt)} · ${characters} caracteres${active ? " · Activo" : ""}`,
-      active,
+  for (const entry of entries) {
+    const latestSession = entry.sessions[0] || null;
+    const document = entry.document;
+    const title = document?.name || latestSession?.sourceDocumentName || "Lectura recuperada";
+    const text = document?.text ?? latestSession?.sourceText ?? "";
+    const characters = text.length.toLocaleString();
+    const active = Boolean((document && currentDocument?.id === document.id) || entry.sessions.some((session) => session.id === currentSession?.id));
+    const matchingSession = libraryActionFor(entry, text) === "resume" ? latestSession : null;
+    const sessionSummary = latestSession
+      ? `${sessionState(latestSession.status)} · ${voiceName(latestSession.voice)} · ${Number(latestSession.speed || 1).toLocaleString("es-UY", { maximumFractionDigits: 2 })}× · fragmento ${latestSession.chunks?.length ? Math.min((latestSession.selectedIndex || 0) + 1, latestSession.chunks.length) : 0}/${latestSession.chunks?.length || 0} · ${formatTime(Number(latestSession.position) || 0)}`
+      : "Sin sesión de lectura";
+    const detail = `${typeText(document?.type || "recovered")} · ${characters} caracteres · ${dateText(document?.updatedAt || document?.importedAt || latestSession?.updatedAt)} · ${sessionSummary}${active ? " · Activo" : ""}`;
+    const card = entryCard({
+      title, detail, active,
       openLabel: active ? "Abierto" : "Abrir",
-      deleteLabel: `Eliminar documento ${saved.name || "sin título"}`,
-      onOpen: () => { if (!active && !libraryMutationBusy) void activateDocument(saved); },
-      onDelete: (event) => { event.stopPropagation(); void deleteLibraryDocument(saved.id); }
+      continueLabel: matchingSession ? "Reanudar" : "Leer",
+      deleteLabel: document
+        ? `Eliminar documento ${title}; las sesiones se conservarán`
+        : `Eliminar ${entry.sessions.length === 1 ? "sesión" : `${entry.sessions.length} sesiones`} recuperable(s) de ${title}`,
+      sessions: entry.sessions,
+      onOpen: () => {
+        if (libraryMutationBusy) return;
+        if (document) void openLibraryEntry(entry, (saved) => activateDocument(saved, null, false, { restoreSession: false }));
+        else if (latestSession) void activateSession(latestSession);
+      },
+      onContinue: () => {
+        if (libraryMutationBusy) return;
+        if (matchingSession) void resumeLibrarySession(matchingSession, activateSession, () => player.play()).catch(showError);
+        else void (async () => {
+          if (document) await activateDocument(document, null, false, { restoreSession: false });
+          else if (latestSession) await activateSession(latestSession);
+          await flushPersistence();
+          await player.play();
+        })().catch(showError);
+      },
+      onDelete: (event) => {
+        event.stopPropagation();
+        if (document) void deleteLibraryDocument(document.id);
+        else void deleteRecoveredLibraryEntry(entry);
+      }
     });
-  });
-  list(ui.sessionsList, savedSessions, "Todavía no hay sesiones guardadas.", (saved) => {
-    const document = documentsById.get(saved.documentId);
-    const name = saved.sourceDocumentName || document?.name || saved.sourceText?.trim().slice(0, 48) || "Texto pegado";
-    const state = ({ playing: "en reproducción", generating: "generando audio", "audio-ready": "audio listo", paused: "pausada", interrupted: "interrumpida", completed: "completada", error: "con error", stopped: "detenida", "text-ready": "lista para leer", empty: "vacía" })[saved.status] || "guardada";
-    const voice = [...ui.voice.options].find((option) => option.value === saved.voice)?.textContent?.trim() || saved.voice || "voz predeterminada";
-    const speed = `${Number(saved.speed || 1).toLocaleString("es-UY", { maximumFractionDigits: 2 })}×`;
-    const active = saved.id === currentSession?.id;
-    const location = saved.documentDeletedAt || (saved.documentId && !document)
-      ? " · documento original eliminado; texto de sesión conservado" : "";
-    return entryCard({
-      title: `${name} — ${dateText(saved.updatedAt || saved.createdAt)}`,
-      detail: `${state} · ${voice} · ${speed} · fragmento ${Math.min((saved.selectedIndex || 0) + 1, Math.max(saved.chunks?.length || 0, 1))}/${saved.chunks?.length || 0} · ${formatTime(Number(saved.position) || 0)} · ${saved.sourceText?.length?.toLocaleString?.() || 0} caracteres${active ? " · Activa" : ""}${location}`,
-      active,
-      openLabel: active ? "Activa" : "Retomar",
-      deleteLabel: `Eliminar sesión de lectura ${name}`,
-      onOpen: () => { if (!active && !libraryMutationBusy) void activateSession(saved); },
-      onDelete: (event) => { event.stopPropagation(); void deleteLibrarySession(saved.id); }
-    });
-  });
-  ui.librarySummary.textContent = `${savedDocuments.length} documentos · ${savedSessions.length} sesiones`;
+    ui.libraryList.append(card);
+  }
+  const sessionCount = entries.reduce((sum, entry) => sum + entry.sessions.length, 0);
+  ui.librarySummary.textContent = `${entries.length} entradas · ${sessionCount} ${sessionCount === 1 ? "sesión" : "sesiones"}`;
   for (const button of ui.library.querySelectorAll("button")) button.disabled = libraryMutationBusy;
 }
 
@@ -626,6 +700,10 @@ async function acceptTabImport(mode) {
     ui.importStatus.textContent = `${merged.message} No se cambió el contenido.`;
     return;
   }
+  if (!merged.text.trim()) {
+    ui.importStatus.textContent = "La importación no contiene texto. No se creó un documento vacío.";
+    return;
+  }
   if (libraryMutationBusy) return;
   libraryMutationBusy = true;
   setContentBusy(true);
@@ -634,12 +712,8 @@ async function acceptTabImport(mode) {
   let session;
   try {
     await flushPersistence();
-    // Retry persistence of the current editor before changing the active document.
-    currentDocument = await repository.saveDocument({ ...currentDocument, text: previousText, extractionStatus: "ready" });
-    currentSession = await repository.saveSession({
-      ...currentSession, sourceText: previousText, chunks: splitText(previousText),
-      voice: ui.voice.value, speed: Number(ui.speed.value)
-    });
+    // A valid editor snapshot is persisted by flushPersistence; an empty draft
+    // intentionally has no document or session to write here.
     await suspendCurrentReadForSwitch();
     selectionEpoch++;
     const title = String(imported.title || "Pestaña importada").trim().slice(0, 160) || "Pestaña importada";
@@ -769,42 +843,48 @@ async function createNewDraft() {
   await flushPersistence();
   await suspendCurrentReadForSwitch();
   selectionEpoch++;
-  const document = await repository.saveDocument({ id: makeId("document"), name: "Texto pegado", type: "text", text: "" });
-  currentDocument = document;
-  currentSession = await repository.saveSession({
-    id: makeId("session"), documentId: document.id, sourceDocumentName: document.name, sourceText: "", chunks: [], selectedIndex: 0,
+  currentDocument = null;
+  currentSession = {
+    id: null, documentId: null, sourceDocumentName: "Texto pegado", sourceText: "", chunks: [], selectedIndex: 0,
     position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
-  });
+  };
   editingForked = false;
   ui.text.value = "";
   ui.fileStatus.textContent = "Editor vacío; los documentos anteriores siguen guardados.";
   player.setSession(currentSession);
-  await chrome.storage.local.set({ lastDocumentId: document.id, lastSessionId: currentSession.id });
+  await chrome.storage.local.remove(["lastDocumentId", "lastSessionId"]);
+  hydrationComplete = true;
   if (ui.library.open) await refreshLibrary();
   updateTextInfo();
 }
 
-async function activateDocument(document, preferredSessionId = null, internal = false) {
+async function activateDocument(document, preferredSessionId = null, internal = false, { restoreSession = true, skipFlush = false } = {}) {
   if (libraryMutationBusy && !internal) return;
   if (!internal) { libraryMutationBusy = true; setContentBusy(true); }
   try {
-  await flushPersistence();
+  if (!skipFlush) await flushPersistence();
   await suspendCurrentReadForSwitch();
   selectionEpoch++;
   currentDocument = document;
   const sessions = await repository.listSessions(document.id);
-  currentSession = sessions.find((item) => item.id === preferredSessionId) || sessions[0] || await repository.saveSession({
-    id: makeId("session"), documentId: document.id, sourceDocumentName: document.name, sourceText: document.text || "", chunks: splitText(document.text || ""),
-    selectedIndex: 0, position: 0, status: document.text ? "text-ready" : "empty",
+  const savedSession = sessions.find((item) => item.id === preferredSessionId) || sessions[0] || null;
+  const editorText = restoreSession ? (savedSession?.sourceText ?? document.text) : document.text;
+  const canUseSavedSession = savedSession && savedSession.sourceText === editorText;
+  currentSession = canUseSavedSession ? savedSession : {
+    id: null, documentId: document.id, sourceDocumentName: document.name, sourceText: editorText, chunks: splitText(editorText),
+    selectedIndex: 0, position: 0, status: editorText.trim() ? "text-ready" : "empty",
     voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
-  });
+  };
   editingForked = false;
-  ui.text.value = currentSession.sourceText ?? document.text ?? "";
+  ui.text.value = editorText;
   if (currentSession.voice && [...ui.voice.options].some((option) => option.value === currentSession.voice && !option.disabled)) ui.voice.value = currentSession.voice;
   if (currentSession.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(currentSession.speed))) ui.speed.value = String(currentSession.speed);
   ui.fileStatus.textContent = document.name ? `Documento guardado · ${document.name}` : "Texto local recuperado.";
   player.setSession(currentSession);
-  await chrome.storage.local.set({ lastDocumentId: document.id, lastSessionId: currentSession.id });
+  const preference = { lastDocumentId: document.id };
+  if (currentSession.id) preference.lastSessionId = currentSession.id;
+  else await chrome.storage.local.remove("lastSessionId");
+  await chrome.storage.local.set(preference);
   hydrationComplete = true;
   updateTextInfo();
   await player.connect(currentSession);
@@ -819,32 +899,40 @@ async function activateDocument(document, preferredSessionId = null, internal = 
   }
 }
 
-async function activateSession(session, internal = false) {
+async function activateSession(session, internal = false, { skipFlush = false } = {}) {
   if (libraryMutationBusy && !internal) return;
   if (!internal) { libraryMutationBusy = true; setContentBusy(true); }
   try {
-  await flushPersistence();
+  if (!skipFlush) await flushPersistence();
   await suspendCurrentReadForSwitch();
   selectionEpoch++;
   let selected = { ...(await repository.getSession(session.id)) || session };
   let document = selected.documentId ? await repository.getDocument(selected.documentId) : null;
   if (!document) {
     const recoveredName = selected.sourceDocumentName || "Lectura recuperada";
-    document = await repository.saveDocument({
-      id: makeId("document"), name: `Recuperado · ${recoveredName}`.slice(0, 180), type: "recovered",
-      text: selected.sourceText || "", extractionStatus: "ready"
-    });
-    selected = await repository.saveSession({ ...selected, documentId: document.id, sourceDocumentName: recoveredName, documentDeletedAt: null });
+    if (String(selected.sourceText || "").trim()) {
+      document = await repository.saveDocument({
+        id: makeId("document"), name: `Recuperado · ${recoveredName}`.slice(0, 180), type: "recovered",
+        text: selected.sourceText, extractionStatus: "ready"
+      });
+      selected = await repository.saveSession({ ...selected, documentId: document.id, sourceDocumentName: recoveredName, documentDeletedAt: null });
+    } else {
+      selected = { ...selected, documentId: null };
+    }
   }
   currentDocument = document;
   currentSession = selected;
   editingForked = false;
-  ui.text.value = selected.sourceText || document.text || "";
+  ui.text.value = selected.sourceText || document?.text || "";
   if ([...ui.voice.options].some((option) => option.value === selected.voice && !option.disabled)) ui.voice.value = selected.voice;
   if ([...ui.speed.options].some((option) => Number(option.value) === Number(selected.speed))) ui.speed.value = String(selected.speed);
-  ui.fileStatus.textContent = `Sesión recuperada · ${selected.sourceDocumentName || document.name}`;
+  ui.fileStatus.textContent = `Sesión recuperada · ${selected.sourceDocumentName || document?.name || "lectura guardada"}`;
   player.setSession(currentSession);
-  await chrome.storage.local.set({ lastDocumentId: document.id, lastSessionId: currentSession.id });
+  if (document) await chrome.storage.local.set({ lastDocumentId: document.id, lastSessionId: currentSession.id });
+  else {
+    await chrome.storage.local.remove("lastDocumentId");
+    await chrome.storage.local.set({ lastSessionId: currentSession.id });
+  }
   hydrationComplete = true;
   updateTextInfo();
   await player.connect(currentSession);
@@ -887,6 +975,7 @@ async function deleteLibraryDocument(documentId) {
     pendingQueueReplacement = false;
     currentDocument = null;
     currentSession = null;
+    ui.text.value = "";
     player.setSession(null);
   }
   try {
@@ -896,7 +985,7 @@ async function deleteLibraryDocument(documentId) {
     if (wasActive) {
       await chrome.storage.local.remove(["lastDocumentId", "lastSessionId"]);
       const nextDocument = (await repository.listDocuments())[0];
-      if (nextDocument) await activateDocument(nextDocument, null, true);
+      if (nextDocument) await activateDocument(nextDocument, null, true, { skipFlush: true });
       else await createNewDraft();
       ui.fileStatus.textContent = `Documento “${document.name}” eliminado. Las sesiones asociadas se conservaron.`;
     }
@@ -915,7 +1004,7 @@ async function deleteLibraryDocument(documentId) {
       await chrome.storage.local.remove(["lastDocumentId", "lastSessionId"]).catch(() => {});
       try {
         const nextDocument = (await repository.listDocuments())[0];
-        if (nextDocument) await activateDocument(nextDocument, null, true);
+        if (nextDocument) await activateDocument(nextDocument, null, true, { skipFlush: true });
         else await createNewDraft();
       } catch { player.setSession(null); }
       ui.fileStatus.textContent = `Documento “${document.name}” eliminado; hubo un problema al actualizar la selección.`;
@@ -959,16 +1048,19 @@ async function deleteLibrarySession(sessionId) {
     await repository.deleteSession(sessionId);
     if (wasActive && document) {
       const nextSession = (await repository.listSessions(document.id))[0];
-      if (nextSession) await activateSession(nextSession, true);
-      else {
-        currentSession = await repository.saveSession({
-          id: makeId("session"), documentId: document.id, sourceDocumentName: document.name,
+      if (nextSession) await activateSession(nextSession, true, { skipFlush: true });
+      else if (editorText.trim()) {
+        currentSession = {
+          id: null, documentId: document.id, sourceDocumentName: document.name,
           sourceText: editorText, chunks: splitText(editorText), selectedIndex: 0, position: 0,
-          status: editorText ? "text-ready" : "empty", voice: ui.voice.value,
-          speed: Number(ui.speed.value), audioKeys: []
-        });
+          status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
+        };
         player.setSession(currentSession);
-        await chrome.storage.local.set({ lastSessionId: currentSession.id });
+        await chrome.storage.local.remove("lastSessionId");
+      } else {
+        currentSession = { id: null, documentId: document.id, sourceDocumentName: document.name, sourceText: "", chunks: [], selectedIndex: 0, position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [] };
+        player.setSession(currentSession);
+        await chrome.storage.local.remove("lastSessionId");
       }
     } else if (wasActive) {
       currentSession = null;
@@ -993,7 +1085,60 @@ async function deleteLibrarySession(sessionId) {
   }
 }
 
+async function deleteRecoveredLibraryEntry(entry) {
+  if (libraryMutationBusy || !entry?.sessions?.length) return;
+  const sessions = [...entry.sessions];
+  const title = sessions[0].sourceDocumentName || "Lectura recuperada";
+  const message = sessions.length === 1
+    ? `¿Eliminar la sesión recuperada “${title}”? Se borrará su progreso y los WAV exclusivos; los audios compartidos y el modelo se conservarán.`
+    : `¿Eliminar las ${sessions.length} sesiones recuperadas de “${title}”? Se borrarán sus progresos y los WAV exclusivos; los audios compartidos y el modelo se conservarán.`;
+  if (!confirm(message)) return;
+
+  libraryMutationBusy = true;
+  setContentBusy(true);
+  libraryRefreshEpoch++;
+  const deletedIds = new Set(sessions.map((session) => session.id));
+  const wasActive = deletedIds.has(currentSession?.id);
+  const editorText = ui.text.value;
+  if (wasActive) {
+    selectionEpoch++;
+    ui.text.disabled = true;
+    await flushPersistence();
+    clearTimeout(persistTimer);
+    pendingQueueReplacement = false;
+    currentSession = null;
+    player.setSession(null);
+  }
+  try {
+    for (const session of sessions) {
+      await player.forgetSession(session.id, false);
+      await repository.deleteSession(session.id);
+    }
+    if (wasActive) {
+      if (currentDocument && editorText.trim()) {
+        currentSession = { id: null, documentId: currentDocument.id, sourceDocumentName: currentDocument.name, sourceText: editorText, chunks: splitText(editorText), selectedIndex: 0, position: 0, status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [] };
+        player.setSession(currentSession);
+        await chrome.storage.local.remove("lastSessionId");
+      } else {
+        currentSession = null;
+        player.setSession(null);
+        await chrome.storage.local.remove("lastSessionId");
+      }
+    }
+    ui.libraryStatus.textContent = `${sessions.length === 1 ? "Sesión recuperada eliminada" : `${sessions.length} sesiones recuperadas eliminadas`}. Los audios compartidos y el modelo se conservaron.`;
+    await refreshStorageUsage();
+  } catch (error) {
+    ui.libraryStatus.textContent = `No se pudieron eliminar todas las sesiones recuperadas: ${error.message}`;
+  } finally {
+    libraryMutationBusy = false;
+    setContentBusy(false);
+    ui.text.disabled = false;
+    if (ui.library.open) await refreshLibrary();
+  }
+}
+
 async function boot() {
+  await repository.cleanEmptyDocuments();
   const preferences = await chrome.storage.local.get(["lastDocumentId", "lastSessionId", "lastVoice", "speed"]);
   if (preferences.lastVoice && [...ui.voice.options].some((option) => option.value === preferences.lastVoice && !option.disabled)) ui.voice.value = preferences.lastVoice;
   if (preferences.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(preferences.speed))) ui.speed.value = String(preferences.speed);
@@ -1008,8 +1153,8 @@ async function boot() {
     return;
   }
   if (!currentDocument) currentDocument = (await repository.listDocuments())[0] || null;
-  if (!currentDocument) currentDocument = await repository.saveDocument({ id: makeId("document"), name: "Texto pegado", type: "text", text: "" });
-  await activateDocument(currentDocument, preferences.lastSessionId);
+  if (!currentDocument) await createNewDraft();
+  else await activateDocument(currentDocument, preferences.lastSessionId, false, { restoreSession: true });
   await refreshModelCacheState();
   await refreshActiveTabContext();
   const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
@@ -1292,7 +1437,7 @@ document.addEventListener("keydown", (event) => {
   if (event.code === "Space") {
     event.preventDefault();
     if (player.snapshot().status === "playing") void player.pause().catch(showError);
-    else void player.play().catch(showError);
+    else void flushPersistence().then(() => player.play()).catch(showError);
   } else if (event.key === "ArrowLeft") {
     event.preventDefault();
     void player.previous().catch(showError);
