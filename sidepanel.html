@@ -10,7 +10,10 @@
   <main class="app">
     <header class="topbar">
       <div><p class="eyebrow">LECTOR LOCAL</p><h1>Escuchar texto</h1></div>
-      <button id="clear-data" class="icon-button" title="Eliminar modelo y preferencias locales" aria-label="Eliminar datos locales"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button>
+      <div class="top-actions">
+        <button id="delete-document" class="text-button" title="Eliminar documento seleccionado">Eliminar documento</button>
+        <button id="delete-session" class="text-button" title="Eliminar sesión seleccionada">Eliminar sesión</button>
+      </div>
     </header>
 
     <section class="card input-card" aria-labelledby="content-heading">
@@ -20,10 +23,36 @@
         <span><strong>Selecciona o suelta un documento</strong><small>PDF, DOCX, TXT o Markdown · hasta 25 MB</small></span>
         <input id="document-file" type="file" accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
       </label>
-      <p id="file-status" class="hint" role="status">Los archivos se procesan en este dispositivo.</p>
+      <p id="file-status" class="hint" role="status">Los documentos se guardan en este dispositivo.</p>
+      <div class="tab-import" aria-labelledby="tab-import-heading">
+        <div class="tab-import-heading"><strong id="tab-import-heading">Importar desde Edge</strong><span>Se procesa localmente</span></div>
+        <div class="tab-import-actions">
+          <button id="import-tab" class="secondary-button">Importar pestaña actual</button>
+          <button id="import-selection" class="text-button">Importar selección</button>
+        </div>
+        <p id="tab-import-status" class="hint" role="status" aria-live="polite">Elige una pestaña y solicita la extracción cuando estés listo.</p>
+        <section id="tab-import-preview" class="tab-import-preview" aria-labelledby="tab-import-preview-title" hidden>
+          <h3 id="tab-import-preview-title">Vista previa</h3>
+          <p id="tab-import-meta" class="hint"></p>
+          <textarea id="tab-import-text" readonly aria-label="Vista previa del texto importado"></textarea>
+          <div class="tab-import-actions">
+            <button id="replace-with-import" class="primary-button">Reemplazar texto actual</button>
+            <button id="append-import" class="secondary-button">Añadir al texto actual</button>
+            <button id="cancel-import" class="text-button">Cancelar</button>
+          </div>
+        </section>
+      </div>
+      <div class="library-row">
+        <label for="document-select">Documento guardado</label>
+        <select id="document-select" aria-label="Documento guardado"></select>
+      </div>
+      <div class="library-row">
+        <label for="session-select">Sesión de lectura</label>
+        <select id="session-select" aria-label="Sesión de lectura"></select>
+      </div>
       <label class="sr-only" for="text-input">Pega o edita aquí el texto que quieres escuchar</label>
       <textarea id="text-input" maxlength="200000" placeholder="Pega o escribe aquí el texto que quieres escuchar…"></textarea>
-      <div class="text-actions"><span id="chunk-count" class="hint">0 fragmentos</span><button id="clear-text" class="text-button">Vaciar texto</button></div>
+      <div class="text-actions"><span id="chunk-count" class="hint">0 fragmentos</span><button id="clear-text" class="text-button">Vaciar editor</button></div>
     </section>
 
     <section class="card voice-card" aria-labelledby="voice-heading">
@@ -42,6 +71,7 @@
       <div class="model-actions"><button id="install-model" class="primary-button">Descargar modelo local</button><button id="test-voice" class="secondary-button" disabled>Probar voz</button></div>
       <progress id="download-progress" max="100" value="0" hidden></progress>
       <p id="model-status" class="hint" role="status">La descarga comienza solo cuando pulsas el botón.</p>
+      <div class="storage-row"><span id="storage-usage" class="hint">Uso local: calculando…</span><button id="delete-audio-cache" class="text-button">Eliminar audios guardados</button><button id="delete-model" class="text-button">Eliminar modelo local</button></div>
     </section>
 
     <section class="card playback-card" aria-labelledby="playback-heading">
@@ -64,11 +94,11 @@
         <button id="stop" class="control-button" title="Detener y volver al inicio" aria-label="Detener y volver al primer fragmento" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
         <button id="next" class="control-button" title="Fragmento siguiente" aria-label="Ir al fragmento siguiente" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 6l10 6-10 6z"/></svg></button>
       </div>
-      <audio id="audio" preload="none"></audio>
       <a id="download-audio" class="download-link" hidden download>Descargar fragmento actual WAV</a>
       <p id="playback-status" class="playback-status" role="status" aria-live="polite">Pega o carga texto para empezar.</p>
     </section>
 
+    <p class="background-note">La reproducción y la cola local pueden continuar mientras se oculta el panel. Si Edge cierra el contexto, la sesión queda guardada para reanudar.</p>
     <footer>Modo local · El texto no se envía a servicios externos.</footer>
   </main>
   <script type="module" src="/src/main.js"></script>

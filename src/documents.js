@@ -1,8 +1,3 @@
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import mammoth from "mammoth";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_PDF_PAGES = 500;
 
@@ -15,6 +10,8 @@ export async function extractDocument(file) {
   }
   if (ext === "txt" || ext === "md" || ext === "markdown") return await file.text();
   if (ext === "docx") {
+    const imported = await import("mammoth");
+    const mammoth = imported.default || imported;
     const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
     return result.value;
   }
@@ -22,6 +19,11 @@ export async function extractDocument(file) {
 }
 
 async function extractPdf(file) {
+  const [pdfjsLib, workerAsset] = await Promise.all([
+    import("pdfjs-dist"),
+    import("pdfjs-dist/build/pdf.worker.min.mjs?url")
+  ]);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerAsset.default;
   const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
   if (pdf.numPages > MAX_PDF_PAGES) throw new Error("El PDF tiene más de 500 páginas; divídelo en archivos más pequeños.");
   const pages = [];

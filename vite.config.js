@@ -10,15 +10,34 @@ export default defineConfig({
   base: "./",
   publicDir: "public",
   resolve: { dedupe: ["@huggingface/transformers", "onnxruntime-web"] },
+  worker: {
+    format: "es",
+    rollupOptions: {
+      output: {
+        assetFileNames(asset) {
+          const names = [asset.name, ...(asset.names || []), ...(asset.originalFileNames || [])].filter(Boolean);
+          if (names.some((name) => name.startsWith("ort-wasm-simd-threaded.jsep"))) return "ort/ort-wasm-simd-threaded.jsep.wasm";
+          return "assets/[name]-[hash][extname]";
+        }
+      }
+    }
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
     target: "chrome120",
     rollupOptions: {
-      input: { popup: resolve("popup.html") },
+      input: {
+        sidepanel: resolve("sidepanel.html"),
+        offscreen: resolve("offscreen.html"),
+        background: resolve("src/background.js")
+      },
       output: {
+        entryFileNames: (chunk) => chunk.name === "background" ? "background.js" : "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
         assetFileNames(asset) {
-          if (asset.name?.startsWith("ort-wasm")) return `ort/${asset.name}`;
+          const names = [asset.name, ...(asset.names || []), ...(asset.originalFileNames || [])].filter(Boolean);
+          if (names.some((name) => name.startsWith("ort-wasm-simd-threaded.jsep"))) return "ort/ort-wasm-simd-threaded.jsep.wasm";
           return "assets/[name]-[hash][extname]";
         }
       }

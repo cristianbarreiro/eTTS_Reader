@@ -29,6 +29,7 @@ export class PlaybackController {
     this.activeIndex = null;
     this.activeKind = null;
     this.restartOnPlay = false;
+    this.pendingResumePosition = 0;
     this.state = {
       chunks: [],
       status: "empty",
@@ -72,6 +73,10 @@ export class PlaybackController {
       if (!this.activeUrl || !finite(this.audio.duration) || this.audio.duration === 0) return;
       this.state.duration = this.audio.duration;
       if (this.activeIndex !== null) this.state.durations[this.activeIndex] = this.audio.duration;
+      if (this.pendingResumePosition > 0 && this.activeIndex === this.state.selectedIndex) {
+        this.audio.currentTime = Math.min(this.pendingResumePosition, this.audio.duration);
+        this.pendingResumePosition = 0;
+      }
       this._syncTime();
       this._publish();
     });
@@ -162,6 +167,24 @@ export class PlaybackController {
 
   async _requestPlay(token) {
     try {
+      if (this.pendingResumePosition > 0) {
+        if (!finite(this.audio.duration) || this.audio.duration <= 0) {
+          await new Promise((resolve, reject) => {
+            const cleanup = () => {
+              this.audio.removeEventListener("loadedmetadata", loaded);
+              this.audio.removeEventListener("error", failed);
+            };
+            const loaded = () => { cleanup(); resolve(); };
+            const failed = () => { cleanup(); reject(new Error("No se pudieron leer los metadatos del audio guardado.")); };
+            this.audio.addEventListener("loadedmetadata", loaded, { once: true });
+            this.audio.addEventListener("error", failed, { once: true });
+          });
+        }
+        if (token !== this.operationId) return false;
+        this.audio.currentTime = Math.min(this.pendingResumePosition, finite(this.audio.duration) ? this.audio.duration : this.pendingResumePosition);
+        this.pendingResumePosition = 0;
+        this._syncTime();
+      }
       this.audio.playbackRate = this.state.speed;
       if ("preservesPitch" in this.audio) this.audio.preservesPitch = true;
       await this.audio.play();
@@ -196,7 +219,38 @@ export class PlaybackController {
     this.state.status = chunks.length ? "text-ready" : "empty";
     this.state.message = chunks.length ? "Texto preparado para leer." : "Pega o carga texto para empezar.";
     this.restartOnPlay = false;
+    this.pendingResumePosition = 0;
     this._clearAudio();
+    this._publish();
+  }
+
+  restore({ chunks = [], selectedIndex = 0, position = 0, status = "text-ready", speed = 1, durations = [], lastError = "" } = {}) {
+    this.operationId++;
+    this.currentTask = null;
+    this.currentTaskKey = null;
+    this._clearAudio();
+    this.state.chunks = [...chunks];
+    this.state.selectedIndex = Math.max(0, Math.min(Number(selectedIndex) || 0, Math.max(0, chunks.length - 1)));
+    this.state.playingIndex = null;
+    this.state.pendingChunkIndices = this.state.chunks.slice(this.state.selectedIndex + 1).map((_, offset) => this.state.selectedIndex + offset + 1);
+    this.state.durations = this.state.chunks.map((_, index) => finite(durations[index]) ? durations[index] : null);
+    this.pendingResumePosition = Math.max(0, Number(position) || 0);
+    this.state.currentTime = this.pendingResumePosition;
+    this.state.duration = this.state.durations[this.state.selectedIndex] ?? null;
+    this.state.speed = Number.isFinite(Number(speed)) ? Number(speed) : 1;
+    this.audio.playbackRate = this.state.speed;
+    this.state.synthesisStatus = "idle";
+    this.state.status = ["playing", "generating", "audio-ready", "interrupted"].includes(status)
+      ? "interrupted"
+      : status === "paused" || status === "error" || status === "stopped" || status === "completed"
+        ? status
+        : this.state.chunks.length ? "text-ready" : "empty";
+    this.state.message = ["playing", "generating", "audio-ready", "interrupted"].includes(status)
+      ? "La sesión se recuperó tras una interrupción. Pulsa Reanudar para continuar."
+      : status === "error" ? String(lastError || "La sesión guardada requiere reintento.")
+        : status === "paused" ? "Sesión pausada recuperada."
+        : this.state.chunks.length ? "Sesión recuperada y lista para continuar." : "Pega o carga texto para empezar.";
+    this.restartOnPlay = false;
     this._publish();
   }
 
@@ -397,6 +451,7 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[target] ?? null;
     this.state.synthesisStatus = "idle";
+    this.pendingResumePosition = 0;
     this.state.status = "text-ready";
     this.state.message = `Seleccionado el fragmento ${target + 1} de ${this.state.chunks.length}.`;
     this.restartOnPlay = false;

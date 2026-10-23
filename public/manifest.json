@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Lector local para Edge",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Lee texto y documentos con síntesis de voz procesada localmente.",
-  "action": { "default_title": "Abrir lector", "default_popup": "popup.html" },
-  "permissions": ["storage"],
+  "action": { "default_title": "Abrir lector local" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["storage", "sidePanel", "offscreen", "activeTab", "scripting"],
   "host_permissions": [
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",

@@ -1,0 +1,73 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { ReaderClient, snapshotFromSession } from "../src/reader-client.js";
+import { KokoroWorkerClient } from "../src/tts-worker-client.js";
+
+function fakeRuntime(handler = async () => ({ ok: true })) {
+  const listeners = new Set();
+  const messages = [];
+  return {
+    messages,
+    onMessage: {
+      addListener(listener) { listeners.add(listener); },
+      removeListener(listener) { listeners.delete(listener); },
+      emit(message) { for (const listener of listeners) listener(message); }
+    },
+    async sendMessage(message) { messages.push(message); return handler(message); }
+  };
+}
+
+test("restored active work is reported as interrupted and keeps its saved position", () => {
+  const snapshot = snapshotFromSession({
+    id: "session-1", sourceText: "First. Second.", chunks: ["First.", "Second."],
+    selectedIndex: 1, position: 3.5, status: "playing", speed: 1.25,
+    durations: [2, 8], audioKeys: ["a", "b"]
+  });
+  assert.equal(snapshot.status, "interrupted");
+  assert.equal(snapshot.selectedIndex, 1);
+  assert.equal(snapshot.currentTime, 3.5);
+  assert.equal(snapshot.duration, 8);
+  assert.equal(snapshot.speed, 1.25);
+  assert.equal(snapshot.currentAudioKey, "b");
+  assert.equal(snapshot.pendingChunkIndices.length, 0);
+});
+
+test("reopening reconnects to an active audio session without issuing another play", async () => {
+  const runtime = fakeRuntime(async ({ command }) => command === "status" ? {
+    ok: true,
+    sessionId: "session-1",
+    currentAudioKey: "audio-current",
+    snapshot: { chunks: ["Read."], status: "playing", selectedIndex: 0, playingIndex: 0, currentTime: 2, duration: 5, speed: 1, durations: [5], totalProgress: 0.4, activeKind: "chunk" }
+  } : { ok: true });
+  const updates = [];
+  const client = new ReaderClient({ runtime, onState: (state) => updates.push(state.status) });
+  await client.connect({ id: "session-1", chunks: ["Read."], sourceText: "Read.", status: "playing", audioKeys: [] });
+
+  assert.deepEqual(runtime.messages.map((message) => message.command), ["status"]);
+  assert.equal(client.snapshot().status, "playing");
+  assert.equal(client.snapshot().currentAudioKey, "audio-current");
+  assert.ok(updates.includes("playing"));
+  client.dispose();
+});
+
+test("Kokoro worker is not created on panel startup and can be disposed after explicit preparation", async () => {
+  let created = 0;
+  let terminated = 0;
+  const worker = {
+    postMessage(message) {
+      queueMicrotask(() => this.onmessage({ data: {
+        id: message.id,
+        type: "result",
+        value: message.type === "initialize" ? { voices: ["af_heart"] } : new Blob(["audio"])
+      } }));
+    },
+    terminate() { terminated++; }
+  };
+  const client = new KokoroWorkerClient({ workerFactory: () => { created++; return worker; } });
+  assert.equal(created, 0);
+  assert.deepEqual(await client.initialize(), { voices: ["af_heart"] });
+  assert.equal(created, 1);
+  assert.equal((await client.synthesize("Hello.", "af_heart")).size, 5);
+  await client.dispose();
+  assert.equal(terminated, 1);
+});

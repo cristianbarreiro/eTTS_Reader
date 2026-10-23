@@ -43,6 +43,10 @@ class MockAudio {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, listener) {
+    this.listeners.set(name, (this.listeners.get(name) || []).filter((item) => item !== listener));
+  }
+
   emit(name) {
     for (const listener of this.listeners.get(name) || []) listener({ type: name, target: this });
   }
@@ -159,6 +163,21 @@ test("pause and resume preserve the current position and reuse the WAV", async (
   assert.equal(player.snapshot().status, "playing");
   assert.equal(audio.currentTime, 3.25);
   assert.equal(synthCalls.length, 1);
+});
+
+test("recovered playback resumes from the stored chunk and position without autoplay during restore", async () => {
+  const { audio, player, synthCalls } = makePlayer();
+  player.restore({ chunks: ["First.", "Resume here."], selectedIndex: 1, position: 3.5, status: "playing", speed: 1.25, durations: [2, 8] });
+  assert.equal(player.snapshot().status, "interrupted");
+  assert.equal(player.snapshot().selectedIndex, 1);
+  assert.equal(player.snapshot().currentTime, 3.5);
+  assert.equal(audio.playCount, 0);
+
+  await player.play();
+  assert.equal(audio.playCount, 1);
+  assert.equal(audio.currentTime, 3.5);
+  assert.equal(audio.playbackRate, 1.25);
+  assert.deepEqual(synthCalls.map(({ text }) => text), ["Resume here."]);
 });
 
 test("seek uses real fragment metadata and reports real current time", async () => {
