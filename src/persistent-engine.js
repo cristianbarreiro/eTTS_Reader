@@ -16,6 +16,7 @@ export class PersistentReaderEngine {
     this.lastProgressWrite = 0;
     this.lastPublished = "";
     this.inFlightAudio = new Map();
+    this.sessionGeneration = 0;
     this.recordedDurations = new Set();
     this.previewAudioKey = null;
     this.player = new PlaybackController({
@@ -95,8 +96,11 @@ export class PersistentReaderEngine {
   }
 
   async _queueAudio(text, voice, index) {
+    const generation = this.sessionGeneration;
     const id = await makeAudioCacheKey(text, voice);
-    if (this.inFlightAudio.has(id)) return this.inFlightAudio.get(id);
+    if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
+    const existing = this.inFlightAudio.get(id);
+    if (existing?.generation === generation) return existing.task;
     const isSessionChunk = this.activeSession?.voice === voice && this.activeSession.chunks[index] === text && this.player.snapshot().activeKind !== "preview";
     if (isSessionChunk) {
       const chunkStates = [...(this.activeSession.chunkStates || this.activeSession.chunks.map(() => "pending"))];
@@ -107,14 +111,17 @@ export class PersistentReaderEngine {
       });
     }
     const task = this.synthesisTail.then(async () => {
+      if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
       const cached = await this.repository.getAudioChunk(id);
       if (cached?.blob instanceof Blob && cached.blob.size > 0) return cached.blob;
       this._publish("reader:model", { state: "loading", message: "Preparando Kokoro local en segundo plano." });
       const blob = await this.inference.synthesize(text, voice);
+      if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
       await validateWavBlob(blob);
       await this.repository.saveAudioChunk({ id, blob, voice, text, format: "wav", sampleRate: 24000, duration: null });
       return blob;
     }).then(async (blob) => {
+      if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la preparación del audio.");
       if (this.player.snapshot().activeKind === "preview") this.previewAudioKey = id;
       if (this.activeSession?.voice === voice && this.activeSession.chunks[index] === text && this.player.snapshot().activeKind !== "preview") {
         const audioKeys = [...(this.activeSession.audioKeys || [])];
@@ -127,21 +134,22 @@ export class PersistentReaderEngine {
       this._publish("reader:model", { state: "ready", message: "Kokoro local listo." });
       return blob;
     }).catch((error) => {
-      if (isSessionChunk && this.activeSession?.chunks[index] === text) {
+      if (generation === this.sessionGeneration && isSessionChunk && this.activeSession?.chunks[index] === text) {
         const chunkStates = [...(this.activeSession.chunkStates || this.activeSession.chunks.map(() => "pending"))];
         chunkStates[index] = "error";
         this.activeSession = { ...this.activeSession, chunkStates, lastError: error.message || "No se pudo generar este fragmento." };
         this.saveTail = this.saveTail.then(() => this.repository.saveSession(this.activeSession)).catch(() => {});
       }
-      this._publish("reader:model", { state: "error", message: error.message || "No se pudo preparar Kokoro." });
+      if (generation === this.sessionGeneration) this._publish("reader:model", { state: "error", message: error.message || "No se pudo preparar Kokoro." });
       throw error;
-    }).finally(() => this.inFlightAudio.delete(id));
-    this.inFlightAudio.set(id, task);
+    }).finally(() => { if (this.inFlightAudio.get(id)?.task === task) this.inFlightAudio.delete(id); });
+    this.inFlightAudio.set(id, { generation, task });
     this.synthesisTail = task.catch(() => {});
     return task;
   }
 
   _applySession(session, { restore = false } = {}) {
+    this.sessionGeneration++;
     this.activeSession = { ...session, audioKeys: Array.isArray(session.audioKeys) ? [...session.audioKeys] : [] };
     this.previewAudioKey = null;
     if (restore) {
@@ -213,6 +221,36 @@ export class PersistentReaderEngine {
       }
       case "pause": this.player.pause(); break;
       case "stop": this.player.stop(); break;
+      case "forget-session": {
+        const sessionId = message.sessionId;
+        if (this.activeSession?.id !== sessionId) return this._response();
+        const current = this.activeSession;
+        const snapshot = this.player.snapshot();
+        const preserve = Boolean(message.preserve);
+        this.sessionGeneration++;
+        this.inFlightAudio.clear();
+        this.player.stop();
+        const stoppedSnapshot = this.player.snapshot();
+        const progress = preserve ? {
+          ...current,
+          selectedIndex: snapshot.selectedIndex,
+          position: snapshot.currentTime,
+          status: snapshot.status === "playing" ? "paused" : snapshot.status === "generating" ? "interrupted" : snapshot.status,
+          audioKeys: [...(current.audioKeys || [])]
+        } : null;
+        const writes = this.saveTail;
+        this.activeSession = null;
+        await writes;
+        if (progress) await this.repository.saveSession(progress);
+        this.player.setChunks([]);
+        this.lastPublished = "";
+        return {
+          ok: true,
+          sessionId: null,
+          snapshot: { ...stoppedSnapshot, chunks: [], status: "empty", selectedIndex: 0, currentTime: 0, activeKind: null, currentAudioKey: null },
+          currentAudioKey: null
+        };
+      }
       case "resume": await this.player.play(); break;
       case "previous": await this.player.previous(); break;
       case "next": await this.player.next(); break;

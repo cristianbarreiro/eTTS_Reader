@@ -1,3 +1,5 @@
+import { splitText } from "./text.js";
+
 const DB_NAME = "edge-local-reader";
 const DB_VERSION = 1;
 
@@ -128,6 +130,7 @@ export class ReaderRepository {
       ...session,
       id: session.id || makeId("session"),
       documentId: session.documentId || null,
+      sourceDocumentName: String(session.sourceDocumentName || previous?.sourceDocumentName || ""),
       sourceText: String(session.sourceText ?? ""),
       chunks,
       audioKeys,
@@ -157,27 +160,64 @@ export class ReaderRepository {
   }
 
   async deleteSession(id) {
-    const target = await this.getSession(id);
-    if (!target) return false;
-    const sessions = await this.listSessions();
-    const retainedAudio = new Set(sessions.filter((item) => item.id !== id).flatMap((item) => item.audioKeys || []));
     const db = await this.open();
     const transaction = db.transaction(["sessions", "audioChunks"], "readwrite");
     const sessionStore = transaction.objectStore("sessions");
     const audioStore = transaction.objectStore("audioChunks");
-    sessionStore.delete(id);
-    for (const audioKey of target.audioKeys || []) if (!retainedAudio.has(audioKey)) audioStore.delete(audioKey);
-    await transactionResult(transaction);
-    return true;
+    let deleted = false;
+    const completion = transactionResult(transaction);
+    const request = sessionStore.getAll();
+    request.onsuccess = () => {
+      const records = request.result || [];
+      const target = records.find((item) => item.id === id);
+      if (!target) return;
+      deleted = true;
+      const retainedAudio = new Set(records.filter((item) => item.id !== id).flatMap((item) => item.audioKeys || []));
+      sessionStore.delete(id);
+      for (const audioKey of target.audioKeys || []) if (!retainedAudio.has(audioKey)) audioStore.delete(audioKey);
+    };
+    await completion;
+    return deleted;
   }
 
   async deleteDocument(id) {
-    const document = await this.getDocument(id);
-    if (!document) return false;
-    const sessions = await this.listSessions(id);
-    for (const session of sessions) await this.deleteSession(session.id);
-    await this._write("documents", (store) => store.delete(id));
-    return true;
+    const db = await this.open();
+    const transaction = db.transaction(["documents", "sessions"], "readwrite");
+    const documents = transaction.objectStore("documents");
+    const sessions = transaction.objectStore("sessions");
+    const completion = transactionResult(transaction);
+    let document = null;
+    let records = null;
+    let documentRead = false;
+    let sessionsRead = false;
+    let deleted = false;
+    const detachAndDelete = () => {
+      if (!documentRead || !sessionsRead || !document) return;
+      deleted = true;
+      const now = Date.now();
+      for (const session of records) {
+        if (session.documentId !== id) continue;
+        const sourceText = String(session.sourceText || document.text || "");
+        const chunks = Array.isArray(session.chunks) && session.chunks.length ? session.chunks : splitText(sourceText);
+        sessions.put({
+          ...session,
+          documentId: null,
+          sourceDocumentName: session.sourceDocumentName || document.name || "Documento eliminado",
+          sourceText,
+          chunks,
+          audioKeys: Array.isArray(session.audioKeys) ? session.audioKeys : [],
+          documentDeletedAt: now,
+          updatedAt: now
+        });
+      }
+      documents.delete(id);
+    };
+    const documentRequest = documents.get(id);
+    documentRequest.onsuccess = () => { document = documentRequest.result || null; documentRead = true; detachAndDelete(); };
+    const sessionsRequest = sessions.getAll();
+    sessionsRequest.onsuccess = () => { records = sessionsRequest.result || []; sessionsRead = true; detachAndDelete(); };
+    await completion;
+    return deleted;
   }
 
   async clearAudioCache() {

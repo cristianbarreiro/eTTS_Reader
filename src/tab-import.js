@@ -47,6 +47,9 @@ export function classifyTab(tab) {
   if (["chromewebstore.google.com", "microsoftedge.microsoft.com"].includes(url.hostname) && /\/(webstore|addons)(\/|$)/i.test(url.pathname)) {
     return { kind: "restricted", message: "La tienda de extensiones no permite extraer su contenido. Puedes pegar el texto manualmente." };
   }
+  if (url.hostname === "docs.google.com" && /^\/document\//i.test(url.pathname)) {
+    return { kind: "google-docs", message: "Google Docs expone parte del contenido mediante una capa de edición propia." };
+  }
   if (url.protocol === "file:") {
     const extension = extensionFromUrl(value);
     if (extension === "pdf") {
@@ -102,6 +105,51 @@ export function extractReadablePage({ selectionOnly = false, maxCharacters = MAX
       type: "selection",
       text: selected.slice(0, limit),
       truncated: selected.length > limit
+    };
+  }
+
+  const isGoogleDocs = /(^|\.)docs\.google\.com$/i.test(String(win?.location?.hostname || ""));
+  if (isGoogleDocs) {
+    const visible = (node) => {
+      if (!node || node.hasAttribute?.("aria-hidden") || node.closest?.("[aria-hidden='true']")) return false;
+      try {
+        const ownerWindow = node.ownerDocument?.defaultView || win;
+        const style = ownerWindow?.getComputedStyle?.(node);
+        const rect = node.getBoundingClientRect?.();
+        if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+        if (rect && (rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= (ownerWindow?.innerHeight || 0))) return false;
+      } catch { return false; }
+      return true;
+    };
+    const roots = [doc];
+    let inaccessibleFrameCount = 0;
+    for (const frame of Array.from(doc.querySelectorAll("iframe") || [])) {
+      if (!visible(frame)) continue;
+      try {
+        const frameDocument = frame.contentDocument;
+        const sameOrigin = frameDocument?.defaultView?.location?.origin === win.location.origin;
+        if (sameOrigin && frameDocument.documentElement) roots.push(frameDocument);
+        else inaccessibleFrameCount++;
+      } catch { inaccessibleFrameCount++; }
+    }
+    const collectVisible = (selector) => roots.flatMap((root) => Array.from(root.querySelectorAll(selector) || []).filter(visible));
+    const pageNodes = collectVisible(".kix-page");
+    const lineNodes = collectVisible(".kix-lineview-text-block");
+    const wordNodes = lineNodes.length ? [] : collectVisible(".kix-wordhtmlgenerator-word-node");
+    const contentNodes = lineNodes.length ? lineNodes : wordNodes;
+    let raw = contentNodes.map((node) => String(node.innerText || node.textContent || "").trim()).filter(Boolean).join("\n");
+    if (!raw && pageNodes.length) raw = pageNodes.map((node) => String(node.innerText || node.textContent || "").trim()).filter(Boolean).join("\n\n");
+    const normalized = raw.replace(/\r\n?/g, "\n").replace(/[\u00a0\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    const text = normalized.slice(0, limit);
+    return {
+      title,
+      contentType,
+      type: text ? "google-docs-visible" : "google-docs",
+      coverage: text ? "visible-pages" : "not-exposed",
+      visiblePageCount: pageNodes.length,
+      inaccessibleFrameCount,
+      text,
+      truncated: normalized.length > limit
     };
   }
 
@@ -239,6 +287,7 @@ export async function importCurrentTab({
   tabsApi = globalThis.chrome?.tabs,
   scriptingApi = globalThis.chrome?.scripting,
   fetchImpl = globalThis.fetch,
+  targetTab = null,
   selectionOnly = false,
   maxCharacters = MAX_IMPORT_CHARACTERS,
   maxBytes = MAX_IMPORT_BYTES,
@@ -250,8 +299,8 @@ export async function importCurrentTab({
     return errorResult("permission-required", "La API de pestañas no está disponible. Abre esta extensión en Edge y vuelve a intentarlo.");
   }
 
-  let tab;
-  try {
+  let tab = targetTab;
+  if (!tab) try {
     const tabs = await tabsApi.query({ active: true, lastFocusedWindow: true });
     tab = tabs?.[0];
   } catch (error) {

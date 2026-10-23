@@ -145,7 +145,7 @@ test("audio chunks are stored as local Blobs and reusable by stable synthesis ke
   await assert.rejects(repository.saveAudioChunk({ id: "invalid", blob: new Blob() }), /identificador y un Blob WAV válido/);
 });
 
-test("deleting a session preserves shared audio, and deleting a document cascades only its sessions", async () => {
+test("deleting a session preserves shared audio and deleting a document detaches recoverable sessions", async () => {
   const repository = makeRepository();
   const firstDocument = await repository.saveDocument({ name: "uno.txt", text: "uno" });
   const secondDocument = await repository.saveDocument({ name: "dos.txt", text: "dos" });
@@ -159,9 +159,26 @@ test("deleting a session preserves shared audio, and deleting a document cascade
   assert.ok(await repository.getDocument(firstDocument.id));
   assert.equal(await repository.deleteDocument(secondDocument.id), true);
   assert.equal(await repository.getDocument(secondDocument.id), undefined);
-  assert.equal(await repository.getSession(secondSession.id), undefined);
+  const detached = await repository.getSession(secondSession.id);
+  assert.ok(detached);
+  assert.equal(detached.documentId, null);
+  assert.equal(detached.sourceDocumentName, "dos.txt");
+  assert.equal(detached.sourceText, "dos");
+  assert.ok(await repository.getAudioChunk("shared-audio"));
+  assert.equal(await repository.deleteSession(secondSession.id), true);
   assert.equal(await repository.getAudioChunk("shared-audio"), undefined);
   assert.ok(await repository.getDocument(firstDocument.id));
+});
+
+test("deleting a document repairs a legacy session missing its own text snapshot", async () => {
+  const repository = makeRepository();
+  const document = await repository.saveDocument({ name: "legacy.txt", type: "txt", text: "Saved document text." });
+  const session = await repository.saveSession({ documentId: document.id, chunks: [], sourceText: "" });
+  await repository.deleteDocument(document.id);
+  const detached = await repository.getSession(session.id);
+  assert.equal(detached.documentId, null);
+  assert.equal(detached.sourceText, "Saved document text.");
+  assert.deepEqual(detached.chunks, ["Saved document text."]);
 });
 
 test("clearing the audio cache keeps documents and sessions but clears audio references", async () => {

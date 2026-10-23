@@ -10,10 +10,6 @@
   <main class="app">
     <header class="topbar">
       <div><p class="eyebrow">LECTOR LOCAL</p><h1>Escuchar texto</h1></div>
-      <div class="top-actions">
-        <button id="delete-document" class="text-button" title="Eliminar documento seleccionado">Eliminar documento</button>
-        <button id="delete-session" class="text-button" title="Eliminar sesión seleccionada">Eliminar sesión</button>
-      </div>
     </header>
 
     <section class="card input-card" aria-labelledby="content-heading">
@@ -24,13 +20,14 @@
         <input id="document-file" type="file" accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
       </label>
       <p id="file-status" class="hint" role="status">Los documentos se guardan en este dispositivo.</p>
+      <button id="choose-source-file" class="text-button file-fallback" hidden>Elegir archivo para importar</button>
       <div class="tab-import" aria-labelledby="tab-import-heading">
         <div class="tab-import-heading"><strong id="tab-import-heading">Importar desde Edge</strong><span>Se procesa localmente</span></div>
         <div class="tab-import-actions">
           <button id="import-tab" class="secondary-button">Importar pestaña actual</button>
           <button id="import-selection" class="text-button">Importar selección</button>
         </div>
-        <p id="tab-import-status" class="hint" role="status" aria-live="polite">Elige una pestaña y solicita la extracción cuando estés listo.</p>
+        <p id="tab-import-status" class="hint" role="status" aria-live="polite">Abre el lector desde la pestaña que quieras importar. También puedes seleccionar texto y usar el menú contextual.</p>
         <section id="tab-import-preview" class="tab-import-preview" aria-labelledby="tab-import-preview-title" hidden>
           <h3 id="tab-import-preview-title">Vista previa</h3>
           <p id="tab-import-meta" class="hint"></p>
@@ -42,18 +39,25 @@
           </div>
         </section>
       </div>
-      <div class="library-row">
-        <label for="document-select">Documento guardado</label>
-        <select id="document-select" aria-label="Documento guardado"></select>
-      </div>
-      <div class="library-row">
-        <label for="session-select">Sesión de lectura</label>
-        <select id="session-select" aria-label="Sesión de lectura"></select>
-      </div>
       <label class="sr-only" for="text-input">Pega o edita aquí el texto que quieres escuchar</label>
       <textarea id="text-input" maxlength="200000" placeholder="Pega o escribe aquí el texto que quieres escuchar…"></textarea>
       <div class="text-actions"><span id="chunk-count" class="hint">0 fragmentos</span><button id="clear-text" class="text-button">Vaciar editor</button></div>
     </section>
+
+    <details id="library-details" class="card library-card">
+      <summary><span>Biblioteca local</span><span id="library-summary-count" class="hint">Abrir documentos y sesiones</span></summary>
+      <section class="library-group" aria-labelledby="documents-heading">
+        <h2 id="documents-heading">Documentos guardados</h2>
+        <p class="hint">Textos y archivos que conservas para volver a leerlos.</p>
+        <div id="documents-list" class="library-list" role="list" aria-label="Documentos guardados"></div>
+      </section>
+      <section class="library-group" aria-labelledby="sessions-heading">
+        <h2 id="sessions-heading">Sesiones de lectura</h2>
+        <p class="hint">Progreso, voz y posición guardados de cada lectura.</p>
+        <div id="sessions-list" class="library-list" role="list" aria-label="Sesiones de lectura"></div>
+      </section>
+      <p id="library-status" class="hint" role="status" aria-live="polite"></p>
+    </details>
 
     <section class="card voice-card" aria-labelledby="voice-heading">
       <div class="section-heading"><h2 id="voice-heading">Voz</h2><span id="engine-state" class="state-pill">Modelo sin descargar</span></div>

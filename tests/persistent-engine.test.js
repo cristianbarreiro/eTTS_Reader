@@ -110,6 +110,29 @@ test("the persistent engine rejects duplicate starts for its active session", as
   assert.equal(calls.filter(({ text }) => text === "First.").length, 1);
 });
 
+test("forgetting a deleted session fences late synthesis writes from restoring its record or WAV", async () => {
+  const repository = new MemoryRepository();
+  let finishSynthesis;
+  const inference = {
+    synthesize() { return new Promise((resolve) => { finishSynthesis = resolve; }); },
+    async initialize() { return { voices: ["af_heart"] }; },
+    async dispose() {}
+  };
+  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference });
+  const starting = engine.handleCommand({ command: "start", session: session() });
+  await waitFor(() => typeof finishSynthesis === "function", "synthesis did not start");
+
+  await engine.handleCommand({ command: "forget-session", sessionId: "session-a", preserve: false });
+  repository.sessions.delete("session-a");
+  finishSynthesis(makeWavBlob());
+  await starting;
+  await delay();
+
+  assert.equal(repository.sessions.has("session-a"), false);
+  assert.equal(repository.audio.size, 0);
+  assert.equal(engine.activeSession, null);
+});
+
 test("saved playback recovers after the offscreen engine is recreated without autoplay", async () => {
   const repository = new MemoryRepository();
   const firstCalls = [];

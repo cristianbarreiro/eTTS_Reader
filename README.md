@@ -5,33 +5,37 @@ Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en
 ## Arquitectura
 
 - `sidepanel.html` y `src/main.js`: interfaz principal, edición del texto, biblioteca y controles.
-- `src/background.js`: service worker basado en eventos; configura el Side Panel, abre el contexto offscreen cuando se solicita audio y enruta mensajes. No usa bucles para mantener el worker vivo.
+- `src/background.js`: captura la pestaña invocadora antes de abrir el Side Panel, conserva una referencia temporal en `storage.session`, valida que siga activa y sin navegación, crea el menú contextual de selección y enruta mensajes. También administra el contexto offscreen; no mantiene el worker vivo con bucles.
 - `offscreen.html` y `src/offscreen.js`: única autoridad de reproducción y cola activa. Puede mantener audio y preparar un fragmento siguiente mientras el panel está oculto.
 - `src/tts-worker.js`: ejecuta Kokoro fuera de la interfaz. Se crea solo al descargar/preparar el modelo o al iniciar una lectura.
 - `src/persistence.js`: IndexedDB para documentos, sesiones y WAV generados. El esquema se amplía con migraciones aditivas; nunca vacía las tiendas durante una actualización.
 - `src/reader-client.js`: reconecta la interfaz a una sesión que ya se está reproduciendo, sin iniciar un segundo reproductor.
 - `src/documents.js`: TXT y Markdown se leen directamente; PDF.js y Mammoth se importan dinámicamente cuando se solicita ese formato.
-- `src/tab-import.js`: se descarga del bundle inicial y solo se carga al pedir una importación; detecta la pestaña activa, extrae el DOM visible o recupera un PDF permitido y devuelve texto revisable.
+- `src/tab-import.js`: extracción local de DOM, selección y PDF. El service worker inyecta el extractor en el `tabId` capturado y devuelve el resultado al panel por mensajería; el extractor PDF.js sigue cargándose solo cuando se necesita.
 - `src/player-controller.js`: estado, cola secuencial, navegación, reanudación por posición y ciclo de vida del WAV activo.
 
 ## Persistencia y eliminación
 
-- El texto pegado o extraído se guarda en IndexedDB con un debounce breve. Cada sesión conserva una instantánea de su texto, fragmentos, voz, velocidad, índice, posición y estado para poder recuperarla aunque el documento activo cambie.
+- La **Biblioteca local** separa documentos (contenido para conservar) y sesiones (copia recuperable del texto, fragmento, posición, voz, velocidad, estado y audios asociados). Se carga al desplegar la sección, no al abrir el panel; sus filas no leen los blobs WAV.
+- El texto pegado o extraído se guarda en IndexedDB con un debounce breve. La edición actualiza el mismo documento; importar un archivo o confirmar una importación de pestaña crea un documento nuevo.
 - Cada WAV se guarda una vez por hash de texto, voz y versión del modelo. Se reutiliza en lecturas siguientes y se precarga como máximo un fragmento siguiente.
 - Voz, velocidad e identificadores recientes usan `chrome.storage.local`; el texto, las sesiones y los WAV grandes no.
 - Cerrar u ocultar el panel no elimina nada. Al reabrir, una reproducción activa se reconecta; si Edge ya terminó el contexto, la interfaz muestra una sesión interrumpida y espera a que el usuario la reanude. Nunca se reanuda audio inesperadamente.
-- **Vaciar editor** crea un borrador vacío y conserva el documento guardado. **Eliminar documento** elimina ese documento y sus sesiones asociadas; los audios compartidos se conservan mientras otra sesión los use. **Eliminar sesión** mantiene el documento. **Eliminar audios guardados** mantiene documentos y sesiones. **Eliminar modelo local** elimina solo las cachés del modelo y las voces.
+- **Vaciar editor** crea un borrador nuevo y conserva los anteriores. Cada documento y sesión tiene su propio botón `X` y confirmación. Borrar un documento desvincula sus sesiones, que conservan su copia de texto, progreso y audio; al retomarlas se crea un documento recuperado. Borrar una sesión borra su progreso y solo los WAV que ninguna otra sesión use. Borrar documentos o sesiones nunca borra el modelo. **Eliminar audios guardados** mantiene documentos y sesiones. **Eliminar modelo local** elimina solo las cachés del modelo y las voces.
 - El panel muestra el consumo de almacenamiento disponible mediante `navigator.storage.estimate()`. Si IndexedDB o la cuota fallan, se informa del error; no se purgan datos automáticamente.
 
 ## Importar una pestaña de Edge
 
-- Pulsa el icono de la extensión desde la pestaña que quieres leer y, en el panel, elige **Importar pestaña actual** o **Importar selección**. La pestaña activa se consulta en el momento del clic; no se fija a la pestaña que abrió originalmente el panel.
+- Pulsa el icono de la extensión desde la pestaña que quieres leer y, en el panel, elige **Importar pestaña actual** o **Importar selección**. El worker captura el `tabId` antes de abrir el panel. La importación exige que siga siendo la pestaña activa y que no haya navegado; si cambias de pestaña, vuelve a invocar la extensión desde la deseada.
 - La extracción se ejecuta solo por esa acción. En páginas web prioriza `article`, `main` y `role="main"`; elimina scripts, navegación, formularios, controles y elementos ocultos. Si no encuentra una región principal, limpia el texto del cuerpo. No modifica la página ni lee valores de formularios.
 - Los visores de texto se importan desde el texto que exponen en su DOM (`pre` cuando está disponible), conservando JSON, CSV, Markdown y texto plano sin convertirlos en HTML. El contenido se limita a 200.000 caracteres, igual que el editor.
-- Para un PDF remoto accesible, la extensión descarga los bytes solo después del clic, sin cookies ni `Referer`, y reutiliza el extractor PDF.js local ya instalado. El archivo tiene un límite de 25 MB y el PDF debe provenir del mismo origen autorizado temporalmente. Un escaneo sin capa de texto no se puede leer porque esta extensión no incluye OCR.
-- PDFs locales, enlaces que requieren cookies, redirecciones a otro origen, páginas `edge://`, tiendas, visores protegidos y aplicaciones que dibujan el contenido en canvas pueden impedir la extracción. En esos casos el panel informa la causa y ofrece el selector de archivos o pegar el texto.
+- También puedes seleccionar texto en la página y usar el menú contextual **Enviar selección al lector local**. El texto seleccionado se captura en el evento contextual, se guarda solo en `storage.session` y llega al panel sin depender de que el panel conserve el foco. La acción del panel `Importar selección` intenta obtener `window.getSelection()` solo del `tabId` autorizado; si no hay selección, no importa la página completa.
+- Para páginas HTML HTTP/HTTPS se prioriza `article`, `main` y `role="main"`, en el marco principal autorizado, sin modificar la página ni leer valores de formulario. No se hace `fetch` de páginas web.
+- Google Docs tiene tratamiento específico para texto expuesto por su DOM de edición (`.kix-lineview-text-block` / `.kix-wordhtmlgenerator-word-node`) y páginas visibles. La vista previa se etiqueta como parcial; no se afirma que sea el documento completo. La capa canvas, frames inaccesibles, contenido fuera de las páginas visibles y la selección propia de Google Docs pueden no estar disponibles. Para el documento completo, descarga DOCX/PDF y usa el selector o copia y pega; el menú contextual puede importar la selección que Edge exponga.
+- Para un PDF remoto accesible, la extensión descarga los bytes solo después del clic, sin cookies ni `Referer`, y reutiliza PDF.js local. El archivo tiene un límite de 25 MB y debe provenir del origen autorizado. Un escaneo sin capa de texto requiere OCR fuera de la extensión. Los PDF locales y el visor integrado de Edge no se inyectan: el panel presenta **Elegir archivo para importar** para seleccionar el PDF original.
+- Enlaces que requieren cookies, redirecciones a otro origen, páginas `edge://`, tiendas, visores protegidos y aplicaciones que dibujan en canvas pueden impedir la extracción. El error conserva el texto actual y ofrece alternativas manuales.
 - Antes de cambiar el editor se presenta título, origen, tipo, cantidad y texto extraído. **Reemplazar texto actual** y **Añadir al texto actual** crean un documento y una sesión nuevos; el documento y las sesiones previas quedan guardados. Si el texto parece repetido al final, se pide confirmación y el usuario puede añadirlo de todos modos.
-- El permiso nuevo `activeTab` da acceso temporal después de que el usuario invoque la extensión sobre la pestaña. `scripting` permite ejecutar la extracción puntual en el marco principal. No se solicita `tabs`, permiso global de sitios, ni `<all_urls>`. Si Edge indica que falta acceso, vuelve a pulsar el icono de la extensión desde la pestaña que deseas importar.
+- `activeTab` y `scripting` dan acceso temporal después de invocar la acción desde la pestaña. `contextMenus` habilita la acción explícita de selección. No se solicita el permiso `tabs`, acceso global a sitios ni `<all_urls>`. `storage.session` guarda temporalmente la pestaña de origen y la selección pendiente; no se almacena en sincronización ni se transmite a servidores.
 - El texto extraído no se transmite a servidores. El único acceso de red de esta función es la descarga GET del PDF seleccionado, desde su mismo origen y sin credenciales; el texto se extrae en el dispositivo.
 
 ## Lectura en segundo plano y límites
@@ -63,7 +67,9 @@ Para actualizar, vuelve a compilar y pulsa **Recargar** en `edge://extensions`.
 
 ## Validación
 
-`npm test` cubre segmentación, reproducción simulada, reanudación, persistencia IndexedDB (con un adaptador de prueba), recuperación sin autoplay, caché de audio, permisos mínimos, clasificación de pestañas, extracción DOM simulada, selección, errores de acceso, descarga PDF acotada y combinación explícita del texto. Estas pruebas no sustituyen una prueba real en Edge con una página web y un PDF abiertos; esas verificaciones deben hacerse en la versión de Edge y el equipo de destino.
+`npm test` cubre segmentación, reproducción simulada, reanudación, persistencia IndexedDB (con un adaptador de prueba), recuperación sin autoplay, caché de audio, permisos mínimos, captura del tabId, validación ante cambio/navegación, menú de selección, clasificación, extracción DOM simulada (incluida salida parcial de Google Docs), borrado con sesiones recuperables, limpieza de audios compartidos y descarga PDF acotada. Estas pruebas no sustituyen una prueba real en Edge. Google Docs y el visor PDF integrado deben verificarse en Edge; la extracción de Google Docs no se considera completa sin esa comprobación.
+
+El proyecto no define scripts de lint ni de comprobación de tipos. `node --check` se puede usar para revisar sintaxis JavaScript; `npm run build` valida el empaquetado de producción.
 
 ## Dependencias y licencias
 

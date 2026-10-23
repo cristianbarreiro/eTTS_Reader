@@ -14,7 +14,7 @@ test("source and production manifests use one Side Panel, an event worker, and m
     assert.equal(manifest.background.service_worker, workerPath);
     assert.equal(manifest.background.type, "module");
     assert.equal(manifest.action.default_popup, undefined);
-    assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "sidePanel", "offscreen", "activeTab", "scripting"]));
+    assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "sidePanel", "offscreen", "activeTab", "scripting", "contextMenus"]));
     assert.ok(!manifest.permissions.includes("tabs"));
     assert.ok(!manifest.host_permissions.includes("<all_urls>"));
     assert.match(manifest.content_security_policy.extension_pages, /wasm-unsafe-eval/);

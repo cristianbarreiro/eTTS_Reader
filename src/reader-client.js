@@ -122,6 +122,13 @@ export class ReaderClient {
   initialize() { return this.request("initialize"); }
   clearAudioCache() { return this.request("clear-audio-cache"); }
   deleteModel() { return this.request("delete-model"); }
+  async forgetSession(sessionId, preserve = false) {
+    const response = await this.runtime.sendMessage({
+      target: "background", command: "forget-session", payload: { sessionId, preserve }
+    });
+    if (response?.ok === false) throw new Error(response.error || "No se pudo detener el trabajo de la sesión.");
+    return response || { ok: true };
+  }
   dispose() { this.runtime.onMessage.removeListener(this.listener); }
 }
 

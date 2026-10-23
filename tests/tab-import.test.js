@@ -14,6 +14,7 @@ test("tab classification separates web, text files, PDFs, local files, and restr
   assert.equal(classifyTab({ url: "https://example.test/feed.csv" }).kind, "text-document");
   assert.equal(classifyTab({ url: "https://example.test/readme.md" }).kind, "text-document");
   assert.equal(classifyTab({ url: "https://example.test/report.pdf?download=1" }).kind, "pdf");
+  assert.equal(classifyTab({ url: "https://docs.google.com/document/d/123/edit" }).kind, "google-docs");
   assert.equal(classifyTab({ url: "file:///C:/docs/report.pdf" }).kind, "local-pdf");
   assert.equal(classifyTab({ url: "file:///C:/docs/readme.txt" }).kind, "local-text-document");
   assert.equal(classifyTab({ url: "file:///C:/docs/index.html" }).kind, "local-text-document");
@@ -77,6 +78,18 @@ test("CSV text and XML markup retain their source representation", () => {
   const xmlBody = element("body", {}, [element("p", {}, [text("Browser-rendered tree")])]);
   const xmlResult = withFakePage({ title: "feed.xml", contentType: "application/xml", body: xmlBody, documentElement: xmlRoot, xmlText: xml }, () => extractReadablePage());
   assert.equal(xmlResult.text, xml);
+});
+
+test("Google Docs returns only visible accessible page text and marks it partial", () => {
+  const body = element("body", {}, [
+    element("div", { class: "kix-lineview-text-block" }, [text("Visible document line.")]),
+    element("div", { class: "kix-lineview-text-block", "aria-hidden": "true" }, [text("Hidden duplicate.")])
+  ]);
+  const output = withFakePage({ title: "Project notes", contentType: "text/html", body, hostname: "docs.google.com" }, () => extractReadablePage());
+  assert.equal(output.type, "google-docs-visible");
+  assert.equal(output.coverage, "visible-pages");
+  assert.equal(output.text, "Visible document line.");
+  assert.doesNotMatch(output.text, /Hidden duplicate|Google Docs/);
 });
 
 test("web page extraction uses the active tab on demand and does not fetch the site", async () => {
@@ -239,7 +252,10 @@ function element(tagName, attributes = {}, children = []) {
       visit(this);
       return descendants.filter((child) => selectors.some((item) => {
         const roleMatch = item.match(/^\[role=['"]([^'"]+)['"]\]$/);
-        return roleMatch ? child.getAttribute("role") === roleMatch[1] : child.tagName.toLowerCase() === item;
+        const classMatch = item.match(/^\.([\w-]+)$/);
+        return roleMatch ? child.getAttribute("role") === roleMatch[1]
+          : classMatch ? String(child.getAttribute("class") || "").split(/\s+/).includes(classMatch[1])
+            : child.tagName.toLowerCase() === item;
       }));
     },
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -250,7 +266,7 @@ function element(tagName, attributes = {}, children = []) {
   return node;
 }
 
-function withFakePage({ title, contentType, body, selection = "", documentElement = null, xmlText = "" }, run) {
+function withFakePage({ title, contentType, body, selection = "", documentElement = null, xmlText = "", hostname = "example.test" }, run) {
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
   body.ownerDocument = null;
@@ -261,6 +277,7 @@ function withFakePage({ title, contentType, body, selection = "", documentElemen
   };
   globalThis.document = doc;
   globalThis.window = {
+    location: { hostname },
     getSelection: () => ({ toString: () => selection }),
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
     XMLSerializer: class { serializeToString() { return xmlText; } }
