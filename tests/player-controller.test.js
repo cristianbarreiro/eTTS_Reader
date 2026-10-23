@@ -91,7 +91,7 @@ class MockAudio {
   }
 }
 
-function makePlayer({ synthesize, onState = () => {}, createObjectURL, revokeObjectURL } = {}) {
+function makePlayer({ synthesize, speech = null, getVoice = () => "af_heart", onState = () => {}, createObjectURL, revokeObjectURL } = {}) {
   const audio = new MockAudio();
   const synthCalls = [];
   const revoked = [];
@@ -102,6 +102,8 @@ function makePlayer({ synthesize, onState = () => {}, createObjectURL, revokeObj
       synthCalls.push({ text, options });
       return makeWavBlob();
     }),
+    speech,
+    getVoice,
     onState,
     createObjectURL: createObjectURL || (() => `blob:reader-${++urlIndex}`),
     revokeObjectURL: revokeObjectURL || ((url) => revoked.push({ url, src: audio.src }))
@@ -361,4 +363,64 @@ test("voice sample can pause, resume, replay, and stop without document text", a
   assert.equal(player.snapshot().status, "empty");
   assert.equal(audio.src, "");
   assert.deepEqual(synthCalls.map(({ text }) => text), ["Hello."]);
+});
+
+test("system speech uses the same queue controls without creating a fake WAV download", async () => {
+  const voiceId = "system:Microsoft%20Sabina%00es-MX";
+  const utterances = [];
+  let cancelCount = 0;
+  let currentSpeech = false;
+  const speech = {
+    play(result, callbacks) {
+      const utterance = { result, callbacks, rate: callbacks.rate };
+      utterances.push(utterance);
+      currentSpeech = true;
+      callbacks.onStart();
+    },
+    pause() { utterances.at(-1)?.callbacks.onPause(); return true; },
+    resume() { utterances.at(-1)?.callbacks.onResume(); return true; },
+    cancel() { if (!currentSpeech) return false; currentSpeech = false; cancelCount++; return true; }
+  };
+  const { audio, player, synthCalls } = makePlayer({
+    speech,
+    getVoice: () => voiceId,
+    synthesize: async (text, options) => {
+      synthCalls.push({ text, options });
+      return { kind: "system-speech", provider: "speechSynthesis", voiceId, text };
+    }
+  });
+  player.setChunks(["Hola.", "¿Cómo estás?"]);
+
+  assert.equal(await player.play(), true);
+  assert.equal(player.snapshot().status, "playing");
+  assert.equal(player.snapshot().activeProvider, "speechSynthesis");
+  assert.equal(player.snapshot().hasDownloadableAudio, false);
+  assert.equal(player.snapshot().downloadUrl, null);
+  assert.equal(audio.playCount, 0);
+  assert.equal(utterances.length, 1);
+  assert.equal(utterances[0].result.text, "Hola.");
+  player.state.durations = [8, 12];
+  utterances[0].callbacks.onBoundary({ charIndex: 2, charLength: 5 });
+  assert.equal(player.snapshot().fragmentProgress, 0.4);
+  assert.equal(player.snapshot().totalProgress, 0.2, "system speech progress must stay text-based even if old WAV durations exist");
+
+  assert.equal(player.pause(), true);
+  assert.equal(player.snapshot().status, "paused");
+  assert.equal(await player.play(), true);
+  assert.equal(utterances.length, 1, "resume should reuse the active utterance");
+
+  assert.equal(player.setSpeed(1.5), true);
+  assert.equal(cancelCount, 1);
+  assert.equal(utterances.length, 2, "changing speed restarts the current utterance at the new rate");
+  assert.equal(utterances[1].rate, 1.5);
+  currentSpeech = false;
+  utterances[1].callbacks.onEnd();
+  await waitFor(() => player.snapshot().selectedIndex === 1 && player.snapshot().status === "playing");
+  assert.equal(utterances[2].result.text, "¿Cómo estás?");
+  assert.equal(synthCalls.length, 2);
+
+  player.stop();
+  assert.equal(cancelCount, 2);
+  assert.equal(player.snapshot().status, "stopped");
+  assert.equal(player.snapshot().downloadUrl, null);
 });

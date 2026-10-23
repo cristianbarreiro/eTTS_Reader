@@ -7,6 +7,7 @@ export class PlaybackController {
     audio,
     synthesize,
     getVoice = () => "af_heart",
+    speech = null,
     onState = () => {},
     createObjectURL = (blob) => URL.createObjectURL(blob),
     revokeObjectURL = (url) => URL.revokeObjectURL(url),
@@ -16,6 +17,7 @@ export class PlaybackController {
     this.audio = audio;
     this.synthesize = synthesize;
     this.getVoice = getVoice;
+    this.speech = speech;
     this.onState = onState;
     this.createObjectURL = createObjectURL;
     this.revokeObjectURL = revokeObjectURL;
@@ -26,6 +28,7 @@ export class PlaybackController {
     this.currentTaskKey = null;
     this.activeUrl = null;
     this.activeBlob = null;
+    this.activeSpeech = null;
     this.activeIndex = null;
     this.activeKind = null;
     this.restartOnPlay = false;
@@ -51,19 +54,10 @@ export class PlaybackController {
 
   _bindAudioEvents() {
     this.audio.addEventListener("play", () => {
-      if (!this.activeUrl) return;
-      this.state.status = "playing";
-      this.state.playingIndex = this.activeIndex;
-      this.state.message = "";
-      this._publish();
+      this._handlePlaybackStart(this.operationId);
     });
     this.audio.addEventListener("pause", () => {
-      if (this.state.status !== "playing") return;
-      this._syncTime();
-      this.state.status = "paused";
-      this.state.playingIndex = null;
-      this.state.message = "";
-      this._publish();
+      this._handlePlaybackPause();
     });
     this.audio.addEventListener("timeupdate", () => {
       this._syncTime();
@@ -94,7 +88,9 @@ export class PlaybackController {
     const knownDurationCount = durations.filter(finite).length;
     const allDurationsKnown = chunks.length > 0 && knownDurationCount === chunks.length;
     const totalDuration = allDurationsKnown ? durations.reduce((sum, duration) => sum + duration, 0) : null;
-    const fragmentProgress = finite(this.state.duration) && this.state.duration > 0
+    const fragmentProgress = this.activeSpeech && this.state.speechCharacterCount > 0
+      ? Math.min(1, this.state.speechCharacterIndex / this.state.speechCharacterCount)
+      : finite(this.state.duration) && this.state.duration > 0
       ? Math.min(1, this.state.currentTime / this.state.duration)
       : this.state.status === "completed" && this.activeKind === "chunk" ? 1 : 0;
     const priorDuration = this.state.selectedIndex > 0
@@ -102,7 +98,7 @@ export class PlaybackController {
       : 0;
     const totalProgress = chunks.length === 0 || this.activeKind === "preview"
       ? 0
-      : allDurationsKnown && totalDuration > 0
+      : !this.activeSpeech && allDurationsKnown && totalDuration > 0
         ? Math.min(1, (priorDuration + this.state.currentTime) / totalDuration)
         : Math.min(1, (this.state.selectedIndex + fragmentProgress) / chunks.length);
 
@@ -115,6 +111,9 @@ export class PlaybackController {
       totalProgress,
       fragmentProgress,
       activeKind: this.activeKind,
+      activeProvider: this.activeSpeech ? "speechSynthesis" : this.activeBlob ? "kokoro" : null,
+      activeVoiceId: this.activeSpeech?.voiceId || this.activeVoiceId || null,
+      hasDownloadableAudio: Boolean(this.activeBlob),
       downloadUrl: this.activeUrl,
       downloadFilename: this.state.downloadFilename
     };
@@ -130,12 +129,15 @@ export class PlaybackController {
   }
 
   _clearAudio() {
+    if (this.activeSpeech) this.speech?.cancel?.();
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
     if (this.activeUrl) this.revokeObjectURL(this.activeUrl);
     this.activeUrl = null;
     this.activeBlob = null;
+    this.activeSpeech = null;
+    this.activeVoiceId = null;
     this.activeIndex = null;
     this.activeKind = null;
     this.state.downloadUrl = null;
@@ -149,9 +151,11 @@ export class PlaybackController {
     return task;
   }
 
-  _activateBlob(blob, { index = null, kind = "chunk", filename }) {
+  _activateBlob(blob, { index = null, kind = "chunk", filename, voice }) {
     this.activeUrl = this.createObjectURL(blob);
     this.activeBlob = blob;
+    this.activeSpeech = null;
+    this.activeVoiceId = voice || this.getVoice?.() || null;
     this.activeIndex = index;
     this.activeKind = kind;
     this.state.activeKind = kind;
@@ -165,8 +169,63 @@ export class PlaybackController {
     this.audio.load();
   }
 
+  _activateSpeech(result, { index = null, kind = "chunk" } = {}) {
+    this.activeUrl = null;
+    this.activeBlob = null;
+    this.activeSpeech = result;
+    this.activeVoiceId = result.voiceId || null;
+    this.activeIndex = index;
+    this.activeKind = kind;
+    this.state.activeKind = kind;
+    this.state.downloadUrl = null;
+    this.state.downloadFilename = null;
+    this.state.currentTime = 0;
+    this.state.duration = null;
+    this.state.speechCharacterIndex = 0;
+    this.state.speechCharacterCount = String(result.text || "").length;
+  }
+
+  _handlePlaybackStart(token) {
+    if (token !== this.operationId || (!this.activeUrl && !this.activeSpeech)) return;
+    this.state.status = "playing";
+    this.state.playingIndex = this.activeIndex;
+    this.state.message = "";
+    this._publish();
+  }
+
+  _handlePlaybackPause() {
+    if (this.state.status !== "playing") return;
+    if (!this.activeSpeech) this._syncTime();
+    this.state.status = "paused";
+    this.state.playingIndex = null;
+    this.state.message = "";
+    this._publish();
+  }
+
   async _requestPlay(token) {
     try {
+      if (this.activeSpeech) {
+        if (!this.speech?.play) throw new Error("La reproducción de voces del sistema no está disponible en este contexto.");
+        if (this.state.status === "paused" && this.speech.resume?.()) return true;
+        this.speech.play(this.activeSpeech, {
+          rate: this.state.speed,
+          onStart: () => this._handlePlaybackStart(token),
+          onPause: () => { if (token === this.operationId) this._handlePlaybackPause(); },
+          onResume: () => this._handlePlaybackStart(token),
+          onBoundary: ({ charIndex, charLength }) => {
+            if (token !== this.operationId) return;
+            this.state.speechCharacterIndex = Math.max(0, Math.min(charIndex, charLength));
+            this.state.speechCharacterCount = charLength;
+            this._publish();
+          },
+          onEnd: () => { if (token === this.operationId) void this._handleEnded(); },
+          onError: (error) => this._fail(error, token)
+        });
+        // SpeechSynthesis fires `start` asynchronously. Mark the player busy now so
+        // a fast second click cannot enqueue the same utterance twice.
+        this._handlePlaybackStart(token);
+        return true;
+      }
       if (this.pendingResumePosition > 0) {
         if (!finite(this.audio.duration) || this.audio.duration <= 0) {
           await new Promise((resolve, reject) => {
@@ -262,8 +321,28 @@ export class PlaybackController {
       this.audio.playbackRate = normalized;
       if ("preservesPitch" in this.audio) this.audio.preservesPitch = true;
     }
+    if (this.activeSpeech && ["playing", "paused"].includes(this.state.status)) {
+      const wasPlaying = this.state.status === "playing";
+      this.speech?.cancel?.();
+      this.state.speechCharacterIndex = 0;
+      this.state.status = "audio-ready";
+      this.state.playingIndex = null;
+      this.state.message = "La velocidad cambió; el fragmento se reinicia desde el principio.";
+      this._publish();
+      if (wasPlaying) void this._requestPlay(this.operationId);
+    }
     this._publish();
     return true;
+  }
+
+  clearDurations({ preserveActive = false } = {}) {
+    this.state.durations = this.state.chunks.map(() => null);
+    this.state.duration = null;
+    if (preserveActive && this.activeUrl && this.activeIndex !== null && finite(this.audio.duration) && this.audio.duration > 0) {
+      this.state.durations[this.activeIndex] = this.audio.duration;
+      this.state.duration = this.audio.duration;
+    }
+    this._publish();
   }
 
   seek(time) {
@@ -300,15 +379,19 @@ export class PlaybackController {
     this._publish();
 
     let task;
-    task = this._serializeSynthesis(text, voice).then(async (blob) => {
+    task = this._serializeSynthesis(text, voice).then(async (result) => {
       if (token !== this.operationId) return false;
-      await this.validateBlob(blob);
-      if (token !== this.operationId) return false;
-      this._activateBlob(blob, {
-        index,
-        kind: "chunk",
-        filename: `lectura-fragmento-${String(index + 1).padStart(2, "0")}.wav`
-      });
+      if (result?.kind === "system-speech") this._activateSpeech(result, { index, kind: "chunk" });
+      else {
+        await this.validateBlob(result);
+        if (token !== this.operationId) return false;
+        this._activateBlob(result, {
+          index,
+          kind: "chunk",
+          filename: `lectura-fragmento-${String(index + 1).padStart(2, "0")}.wav`,
+          voice
+        });
+      }
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
       this.state.message = `Fragmento ${index + 1} preparado.`;
@@ -343,11 +426,14 @@ export class PlaybackController {
     this._publish();
 
     let task;
-    task = this._serializeSynthesis(text, voice).then(async (blob) => {
+    task = this._serializeSynthesis(text, voice).then(async (result) => {
       if (token !== this.operationId) return false;
-      await this.validateBlob(blob);
-      if (token !== this.operationId) return false;
-      this._activateBlob(blob, { kind: "preview", filename });
+      if (result?.kind === "system-speech") this._activateSpeech(result, { kind: "preview" });
+      else {
+        await this.validateBlob(result);
+        if (token !== this.operationId) return false;
+        this._activateBlob(result, { kind: "preview", filename, voice });
+      }
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
       this.state.message = "Muestra preparada.";
@@ -373,11 +459,12 @@ export class PlaybackController {
 
   async play() {
     if (!this.state.chunks.length) {
-      if (this.activeKind === "preview" && this.activeUrl && this.state.status === "paused") return this._requestPlay(this.operationId);
-      if (this.activeKind === "preview" && this.activeUrl && this.state.status === "completed") {
+      if (this.activeKind === "preview" && (this.activeUrl || this.activeSpeech) && this.state.status === "paused") return this._requestPlay(this.operationId);
+      if (this.activeKind === "preview" && (this.activeUrl || this.activeSpeech) && this.state.status === "completed") {
         try {
-          this.audio.currentTime = 0;
+          if (this.activeUrl) this.audio.currentTime = 0;
           this.state.currentTime = 0;
+          this.state.speechCharacterIndex = 0;
           this.state.status = "audio-ready";
           this.state.message = "Muestra preparada.";
           this._publish();
@@ -393,17 +480,18 @@ export class PlaybackController {
     if (this.state.status === "generating" && this.currentTask && this.currentTaskKey === `chunk:${this.state.selectedIndex}`) {
       return this.currentTask;
     }
-    if (this.activeKind === "preview" && this.activeUrl && this.state.status !== "completed") {
+    if (this.activeKind === "preview" && (this.activeUrl || this.activeSpeech) && this.state.status !== "completed") {
       return this._requestPlay(this.operationId);
     }
     const restart = this.state.status === "completed" && this.restartOnPlay;
     const index = restart ? 0 : this.state.selectedIndex;
     this.restartOnPlay = false;
-    if (this.activeKind === "chunk" && this.activeIndex === index && this.activeUrl) {
+    if (this.activeKind === "chunk" && this.activeIndex === index && this.activeVoiceId === (this.getVoice?.() ?? "af_heart") && (this.activeUrl || this.activeSpeech)) {
       if (restart) {
         try {
-          this.audio.currentTime = 0;
+          if (this.activeUrl) this.audio.currentTime = 0;
           this.state.currentTime = 0;
+          this.state.speechCharacterIndex = 0;
           this._publish();
         } catch (error) {
           this._fail(error, this.operationId);
@@ -417,6 +505,7 @@ export class PlaybackController {
 
   pause() {
     if (this.state.status !== "playing") return false;
+    if (this.activeSpeech) return Boolean(this.speech?.pause?.());
     this.audio.pause();
     return true;
   }
@@ -464,8 +553,9 @@ export class PlaybackController {
   next() { return this._navigate(1); }
 
   async _handleEnded() {
-    if (!this.activeUrl) return;
-    this._syncTime();
+    if (!this.activeUrl && !this.activeSpeech) return;
+    if (this.activeSpeech) this.state.speechCharacterIndex = this.state.speechCharacterCount;
+    else this._syncTime();
     this.state.playingIndex = null;
     if (this.activeKind === "preview") {
       this.state.status = "completed";

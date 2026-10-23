@@ -179,18 +179,31 @@ test("session persistence retains failed chunk state and its retryable error", a
   assert.equal(saved.lastError, "Kokoro no pudo iniciar.");
 });
 
+test("session voice provider metadata is normalized from the current voice ID", async () => {
+  const repository = makeRepository();
+  const saved = await repository.saveSession({
+    id: "voice-session", sourceText: "Hola.", chunks: ["Hola."],
+    voice: "system:urn%3Asabina", voiceId: "af_heart", voiceProvider: "kokoro"
+  });
+  assert.equal(saved.voice, "system:urn%3Asabina");
+  assert.equal(saved.voiceId, "system:urn%3Asabina");
+  assert.equal(saved.voiceProvider, "speechSynthesis");
+});
+
 test("audio chunks are stored as local Blobs and reusable by stable synthesis keys", async () => {
   const repository = makeRepository();
   const blob = new Blob(["wav"], { type: "audio/wav" });
   const key = await makeAudioCacheKey("Read me.", "af_heart");
   const changedTextKey = await makeAudioCacheKey("Read me again.", "af_heart");
   const changedVoiceKey = await makeAudioCacheKey("Read me.", "am_michael");
+  const changedProviderKey = await makeAudioCacheKey("Read me.", "af_heart", undefined, "other-provider");
   await repository.saveAudioChunk({ id: key, blob, voice: "af_heart", format: "wav", sampleRate: 24000, duration: 1.1 });
   const stored = await repository.getAudioChunk(key);
   assert.equal(stored.blob.size, blob.size);
   assert.equal(stored.sampleRate, 24000);
   assert.notEqual(key, changedTextKey);
   assert.notEqual(key, changedVoiceKey);
+  assert.notEqual(key, changedProviderKey);
   await assert.rejects(repository.saveAudioChunk({ id: "invalid", blob: new Blob() }), /identificador y un Blob WAV válido/);
 });
 

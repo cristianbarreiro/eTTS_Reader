@@ -71,15 +71,17 @@
       <div class="voice-row">
         <label for="voice-select">Perfil vocal</label>
         <select id="voice-select">
-          <option value="af_heart">English — Female · Heart</option>
-          <option value="am_michael">English — Male · Michael</option>
-          <option value="ef_dora" disabled>Español — Femenina · Dora (no compatible)</option>
-          <option value="em_alex" disabled>Español — Masculina · Alex (no compatible)</option>
+          <option value="af_heart">English — Female · Heart · Kokoro</option>
+          <option value="am_michael">English — Male · Michael · Kokoro</option>
+          <optgroup id="system-voice-options" label="Voces españolas de Edge/Windows">
+            <option value="system-voices-loading" disabled>Buscando voces del sistema…</option>
+          </optgroup>
         </select>
       </div>
       <div class="voice-row speed-row"><label for="speed">Velocidad</label><div class="speed-control"><select id="speed" aria-label="Velocidad de reproducción"><option value="0.75">0,75×</option><option value="1" selected>1,0×</option><option value="1.25">1,25×</option><option value="1.5">1,5×</option><option value="1.75">1,75×</option><option value="2">2,0×</option></select></div></div>
-      <p id="voice-note" class="notice">Kokoro local admite perfiles de inglés en este paquete. Los perfiles en español se muestran como no disponibles.</p>
+      <p id="voice-note" class="notice">Kokoro local genera WAV con Heart y Michael. Las voces españolas aparecen si Edge/Windows ofrece alguna.</p>
       <div class="model-actions"><button id="install-model" class="primary-button">Descargar modelo local</button><button id="test-voice" class="secondary-button" disabled>Probar voz</button></div>
+      <button id="refresh-system-voices" class="text-button" type="button">Actualizar voces de Edge/Windows</button>
       <progress id="download-progress" max="100" value="0" hidden></progress>
       <p id="model-status" class="hint" role="status">La descarga comienza solo cuando pulsas el botón.</p>
       <div class="storage-row"><span id="storage-usage" class="hint">Uso local: calculando…</span><button id="delete-audio-cache" class="text-button">Eliminar audios guardados</button><button id="delete-model" class="text-button">Eliminar modelo local</button></div>
@@ -110,7 +112,7 @@
     </section>
 
     <p class="background-note">La reproducción y la cola local pueden continuar mientras se oculta el panel. Si Edge cierra el contexto, la sesión queda guardada para reanudar.</p>
-    <footer>Modo local · El texto no se envía a servicios externos.</footer>
+    <footer id="privacy-note">Con Kokoro, la síntesis de voz se procesa localmente. Las voces del sistema pueden usar servicios de Edge/Windows.</footer>
   </main>
   <script type="module" src="/src/main.js"></script>
 </body>

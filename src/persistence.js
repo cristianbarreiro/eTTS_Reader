@@ -1,4 +1,5 @@
 import { splitText } from "./text.js";
+import { getVoiceProvider } from "./voice-catalog.js";
 
 const DB_NAME = "edge-local-reader";
 const DB_VERSION = 1;
@@ -181,6 +182,7 @@ export class ReaderRepository {
     const audioKeys = Array.isArray(session.audioKeys) ? [...session.audioKeys] : [];
     const validChunkStates = new Set(["pending", "generating", "ready", "error"]);
     const suppliedChunkStates = Array.isArray(session.chunkStates) ? session.chunkStates : [];
+    const voiceId = session.voice || session.voiceId || previous?.voice || previous?.voiceId || "af_heart";
     const record = {
       ...session,
       id: session.id || makeId("session"),
@@ -194,7 +196,9 @@ export class ReaderRepository {
       position: Math.max(0, Number(session.position) || 0),
       status: session.status || "text-ready",
       lastError: String(session.lastError || (session.status === "error" ? session.message : "") || ""),
-      voice: session.voice || "af_heart",
+      voice: voiceId,
+      voiceId,
+      voiceProvider: getVoiceProvider(voiceId),
       speed: Number(session.speed) || 1,
       createdAt: previous?.createdAt || session.createdAt || now,
       updatedAt: now
@@ -300,8 +304,8 @@ export class ReaderRepository {
   }
 }
 
-export async function makeAudioCacheKey(text, voice, modelId = "onnx-community/Kokoro-82M-v1.0-ONNX") {
-  const value = `${modelId}\nkokoro-js@1.2.1\n@huggingface/transformers@3.8.1\nonnxruntime-web@1.22.0-dev.20250409-89f8206ba4\n${voice}\n${String(text)}`;
+export async function makeAudioCacheKey(text, voice, modelId = "onnx-community/Kokoro-82M-v1.0-ONNX", provider = "kokoro") {
+  const value = `${provider}\n${modelId}\nkokoro-js@1.2.1\n@huggingface/transformers@3.8.1\nonnxruntime-web@1.22.0-dev.20250409-89f8206ba4\n${voice}\n${String(text)}`;
   const bytes = new TextEncoder().encode(value);
   if (globalThis.crypto?.subtle) {
     const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);

@@ -119,7 +119,7 @@ export class ReaderClient {
   }
   setVoice(value) { return this.request("voice", { value }); }
   preview(voice) { return this.request("preview", { voice }); }
-  initialize() { return this.request("initialize"); }
+  initialize(voice = this.session?.voice || "af_heart") { return this.request("initialize", { voice }); }
   clearAudioCache() { return this.request("clear-audio-cache"); }
   deleteModel() { return this.request("delete-model"); }
   async forgetSession(sessionId, preserve = false) {

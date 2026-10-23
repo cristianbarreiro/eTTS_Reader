@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Lector local para Edge",
   "version": "0.5.0",
-  "description": "Lee texto y documentos con síntesis de voz procesada localmente.",
+  "description": "Lee texto y documentos con Kokoro local o voces disponibles de Edge/Windows.",
   "action": { "default_title": "Abrir lector local" },
   "side_panel": { "default_path": "dist/sidepanel.html" },
   "background": { "service_worker": "dist/background.js", "type": "module" },

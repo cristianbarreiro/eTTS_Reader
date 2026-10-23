@@ -71,6 +71,18 @@ test("reader controls stay disabled while idle, loading, or failed; retry is ena
   assert.equal(deriveReaderControls("ready", 0).canPlay, false);
 });
 
+test("a listed system voice can play and pause without initializing Kokoro", () => {
+  const system = deriveReaderControls("idle", 1, false, { provider: "speechSynthesis", systemVoiceAvailable: true });
+  assert.equal(system.canInitialize, false);
+  assert.equal(system.canPlay, true);
+  assert.equal(system.canTestVoice, true);
+  assert.equal(system.canPause, false);
+
+  const missing = deriveReaderControls("ready", 1, false, { provider: "speechSynthesis", systemVoiceAvailable: false });
+  assert.equal(missing.canPlay, false);
+  assert.equal(missing.canTestVoice, false);
+});
+
 test("failed model initialization enters error state and can be retried", async () => {
   const states = [];
   const failure = new Error("download failed");

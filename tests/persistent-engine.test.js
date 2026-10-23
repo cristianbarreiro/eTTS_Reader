@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PersistentReaderEngine } from "../src/persistent-engine.js";
+import { makeSystemVoiceId, systemVoiceRecord } from "../src/voice-catalog.js";
 
 function makeWavBlob() {
   const bytes = new Uint8Array(48);
@@ -195,4 +196,52 @@ test("explicit audio-cache deletion clears persisted references without stopping
   assert.deepEqual(saved.audioKeys, []);
   assert.deepEqual(saved.chunkStates, ["pending"]);
   assert.equal(repository.audio.size, 0);
+});
+
+test("system-voice sessions bypass WAV caching and persist their provider without changing other sessions", async () => {
+  const repository = new MemoryRepository();
+  const platformVoice = { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina" };
+  const voice = systemVoiceRecord(platformVoice);
+  const played = [];
+  const inferenceCalls = [];
+  const inference = {
+    async initialize(_progress, voiceId) { inferenceCalls.push(voiceId); return { provider: "speechSynthesis" }; },
+    async listSystemVoices() { return [voice]; },
+    async synthesize(text, voiceId) { return { kind: "system-speech", provider: "speechSynthesis", voiceId, text }; },
+    async dispose() {}
+  };
+  const speech = {
+    play(result, callbacks) { played.push(result); callbacks.onStart(); },
+    pause() { return true; },
+    resume() { return true; },
+    cancel() {}
+  };
+  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference, speech });
+  const spanishSession = {
+    ...session(),
+    voice: voice.id,
+    voiceId: voice.id,
+    voiceProvider: "speechSynthesis",
+    audioKeys: ["old-kokoro-wav-key"]
+  };
+  const otherSession = { ...session(), id: "session-other", voice: "af_heart", voiceProvider: "kokoro" };
+  repository.sessions.set(otherSession.id, otherSession);
+
+  const init = await engine.handleCommand({ command: "initialize", voice: voice.id });
+  assert.equal(init.result.provider, "speechSynthesis");
+  assert.deepEqual(inferenceCalls, [voice.id]);
+
+  const started = await engine.handleCommand({ command: "start", session: spanishSession });
+  assert.equal(started.snapshot.activeProvider, "speechSynthesis");
+  assert.equal(started.currentAudioKey, null);
+  assert.equal(engine.activeSession.voiceProvider, "speechSynthesis");
+  assert.equal(engine.activeSession.audioKeys[0], null);
+  assert.equal(repository.audio.size, 0);
+  assert.equal(played[0].text, "First.");
+
+  await engine.handleCommand({ command: "voice", value: voice.id });
+  assert.equal(repository.sessions.get("session-a").voiceId, voice.id);
+  assert.equal(repository.sessions.get("session-a").voiceProvider, "speechSynthesis");
+  assert.equal(repository.sessions.get("session-other").voice, "af_heart");
+  assert.equal(repository.sessions.get("session-other").voiceProvider, "kokoro");
 });

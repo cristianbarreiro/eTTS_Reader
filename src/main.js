@@ -6,7 +6,8 @@ import { makeId, ReaderRepository } from "./persistence.js";
 import { persistEditorSnapshot } from "./editor-persistence.js";
 import { buildLibraryEntries, libraryActionFor, openLibraryEntry, resumeLibrarySession } from "./library.js";
 import { ReaderClient } from "./reader-client.js";
-import { KokoroWorkerClient } from "./tts-worker-client.js";
+import { getVoiceProvider, isSystemVoiceId, voiceSessionFields } from "./voice-catalog.js";
+import { SystemSpeechProvider } from "./system-speech.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -19,7 +20,7 @@ const ui = {
   followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
   replaceImport: $("#replace-with-import"), appendImport: $("#append-import"), cancelImport: $("#cancel-import"),
-  voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"),
+  voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"), refreshVoices: $("#refresh-system-voices"), voiceNote: $("#voice-note"), privacyNote: $("#privacy-note"),
   engineState: $("#engine-state"), modelStatus: $("#model-status"), downloadProgress: $("#download-progress"),
   play: $("#play"), pause: $("#pause"), stop: $("#stop"), previous: $("#previous"), next: $("#next"),
   position: $("#position"), playerState: $("#player-state"), playbackStatus: $("#playback-status"),
@@ -30,7 +31,6 @@ const ui = {
 };
 
 const repository = new ReaderRepository();
-let inferenceWorker = null;
 let modelState = "idle";
 let initializationPromise = null;
 let currentDocument = null;
@@ -54,6 +54,8 @@ let currentTabContext = null;
 let activeImportOperation = 0;
 let followChangeSequence = 0;
 let fileSelectionPurpose = "document";
+let systemVoices = [];
+const systemVoiceCatalog = new SystemSpeechProvider();
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 const player = new ReaderClient({
@@ -85,7 +87,45 @@ function setContentBusy(busy) {
 
 function controlsModelState() { return modelState === "cached" ? "ready" : modelState; }
 function readerControls(snapshot = player.snapshot()) {
-  return deriveReaderControls(controlsModelState(), snapshot.chunks.length, snapshot.status === "playing");
+  const isCurrentSpeech = snapshot.activeProvider === "speechSynthesis" && ["playing", "paused", "audio-ready"].includes(snapshot.status);
+  const voiceId = isCurrentSpeech ? snapshot.activeVoiceId : ui.voice.value;
+  const provider = getVoiceProvider(voiceId);
+  return deriveReaderControls(controlsModelState(), snapshot.chunks.length, snapshot.status === "playing", {
+    provider,
+    systemVoiceAvailable: provider === "speechSynthesis" && (isCurrentSpeech || systemVoices.some((voice) => voice.id === voiceId))
+  });
+}
+
+function updateVoiceProviderUI() {
+  const selected = ui.voice.value;
+  const systemVoice = systemVoices.find((voice) => voice.id === selected);
+  const isSystem = isSystemVoiceId(selected);
+  if (isSystem) {
+    ui.engineState.textContent = systemVoice ? "Voz del sistema" : "Voz del sistema no disponible";
+    ui.engineState.dataset.state = systemVoice ? "system" : "error";
+    ui.voiceNote.textContent = systemVoice
+      ? `${systemVoice.label} · gestionada por Edge/Windows. El sistema podría procesar texto mediante sus servicios. Usa Kokoro para síntesis local; SpeechSynthesis no exporta WAV.`
+      : "Esta voz guardada ya no aparece en Edge/Windows. Actualiza la lista o selecciona otra voz.";
+    ui.privacyNote.textContent = "Voz del sistema: el texto se entrega a Edge/Windows y podría procesarse mediante sus servicios. Usa Kokoro si necesitas síntesis local.";
+    ui.modelStatus.textContent = systemVoice
+      ? "Sin descarga de modelo. El modo sin conexión depende de la voz y la configuración del sistema; no se puede garantizar."
+      : "Voz del sistema no encontrada. No se seleccionará otra voz automáticamente.";
+    ui.install.textContent = "Kokoro · voces inglesas";
+    ui.install.disabled = true;
+    return;
+  }
+  ui.engineState.textContent = modelLabel();
+  ui.engineState.dataset.state = modelState;
+  ui.voiceNote.textContent = "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
+  ui.privacyNote.textContent = "Con Kokoro, el texto se sintetiza localmente; la red solo se usa para descargar los pesos solicitados.";
+  ui.install.disabled = ["loading", "ready", "cached"].includes(modelState);
+  ui.install.textContent = ({
+    idle: "Preparar Kokoro local",
+    cached: "Modelo preparado",
+    loading: "Preparando Kokoro…",
+    ready: "Modelo preparado",
+    error: "Reintentar carga local"
+  })[modelState] || "Preparar Kokoro local";
 }
 
 function modelLabel() {
@@ -105,7 +145,9 @@ function playerLabel(snapshot) {
     if (snapshot.status === "paused") return "Muestra pausada";
     if (snapshot.status === "completed") return "Muestra completada";
   }
-  if (["text-ready", "stopped"].includes(snapshot.status) && !["ready", "cached"].includes(modelState)) return modelLabel();
+  if (["text-ready", "stopped"].includes(snapshot.status) && !readerControls(snapshot).canPlay) {
+    return isSystemVoiceId(ui.voice.value) ? "Voz del sistema no disponible" : modelLabel();
+  }
   return ({
     "text-ready": "Texto preparado",
     generating: "Generando audio",
@@ -121,9 +163,13 @@ function playerLabel(snapshot) {
 
 function describePlayer(snapshot) {
   if (snapshot.status === "playing") {
+    if (snapshot.activeProvider === "speechSynthesis") return snapshot.activeKind === "preview"
+      ? "Reproduciendo una muestra con Edge/Windows. El sistema puede procesar el texto; esta voz no genera un WAV descargable."
+      : `Reproduciendo con Edge/Windows, fragmento ${(snapshot.playingIndex ?? snapshot.selectedIndex) + 1} de ${snapshot.chunks.length}. El sistema puede procesar el texto.`;
     if (snapshot.activeKind === "preview") return "Reproduciendo la muestra de voz local.";
     return `Reproduciendo fragmento ${(snapshot.playingIndex ?? snapshot.selectedIndex) + 1} de ${snapshot.chunks.length}.`;
   }
+  if (snapshot.status === "paused" && snapshot.activeProvider === "speechSynthesis") return "Voz del sistema pausada; la posición temporal exacta no está disponible.";
   if (snapshot.status === "paused") return snapshot.activeKind === "preview"
     ? `Muestra pausada en ${formatTime(snapshot.currentTime)}.`
     : `Lectura pausada en ${formatTime(snapshot.currentTime)} del fragmento ${snapshot.selectedIndex + 1}.`;
@@ -132,6 +178,7 @@ function describePlayer(snapshot) {
 }
 
 function renderPlayer(snapshot) {
+  updateVoiceProviderUI();
   const chunkCount = snapshot.chunks.length;
   const hasText = chunkCount > 0;
   const controls = readerControls(snapshot);
@@ -147,24 +194,30 @@ function renderPlayer(snapshot) {
   const progress = Number.isFinite(snapshot.totalProgress) ? snapshot.totalProgress : 0;
   ui.progressFill.style.width = `${Math.round(progress * 100)}%`;
   ui.progress.setAttribute("aria-valuenow", String(Math.round(progress * 100)));
-  const progressText = snapshot.activeKind === "preview" ? "Muestra de voz · la lectura no cambia"
+  const progressText = snapshot.activeProvider === "speechSynthesis" && snapshot.activeKind !== "preview"
+    ? `Progreso aproximado por texto · ${Math.round(progress * 100)}% · sin búsqueda temporal`
+    : snapshot.activeKind === "preview" ? "Muestra de voz · la lectura no cambia"
     : snapshot.totalDuration !== null
     ? `Progreso temporal · ${Math.round(progress * 100)}%`
     : hasText ? `${selected} de ${chunkCount} fragmentos · duración total pendiente` : "Sin progreso";
   ui.progress.setAttribute("aria-valuetext", progressText);
   ui.progressCaption.textContent = progressText;
 
-  ui.elapsed.textContent = formatTime(snapshot.currentTime);
-  ui.duration.textContent = formatTime(snapshot.duration ?? Number.NaN);
+  ui.elapsed.textContent = snapshot.activeProvider === "speechSynthesis" ? "—" : formatTime(snapshot.currentTime);
+  ui.duration.textContent = snapshot.activeProvider === "speechSynthesis" ? "—" : formatTime(snapshot.duration ?? Number.NaN);
   ui.seek.min = "0";
   ui.seek.max = String(snapshot.duration || 0);
   ui.seek.step = "0.1";
   ui.seek.value = String(Math.min(snapshot.currentTime, snapshot.duration || 0));
   ui.seek.disabled = !Number.isFinite(snapshot.duration) || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
-  ui.seek.setAttribute("aria-valuetext", `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
+  ui.seek.setAttribute("aria-valuetext", snapshot.activeProvider === "speechSynthesis"
+    ? "La voz del sistema no informa posición temporal para buscar."
+    : `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
 
   const knownSeconds = snapshot.durations.reduce((sum, duration) => sum + (Number.isFinite(duration) ? duration : 0), 0);
-  ui.durationSummary.textContent = snapshot.activeKind === "preview" ? `Duración de la muestra ${formatTime(snapshot.duration)}`
+  ui.durationSummary.textContent = snapshot.activeProvider === "speechSynthesis"
+    ? "La duración y la búsqueda temporal no están disponibles para voces del sistema."
+    : snapshot.activeKind === "preview" ? `Duración de la muestra ${formatTime(snapshot.duration)}`
     : snapshot.totalDuration !== null
     ? `Duración total ${formatTime(snapshot.totalDuration)} · ${snapshot.knownDurationCount} fragmentos medidos`
     : hasText ? `Duración conocida ${formatTime(knownSeconds)} · total pendiente (${snapshot.knownDurationCount}/${chunkCount} fragmentos medidos)`
@@ -172,7 +225,7 @@ function renderPlayer(snapshot) {
 
   ui.play.hidden = isPlaying;
   ui.pause.hidden = !isPlaying;
-  const canResumePreview = snapshot.activeKind === "preview" && ["paused", "completed"].includes(snapshot.status);
+  const canResumePreview = snapshot.activeKind === "preview" && ["paused", "completed"].includes(snapshot.status) && controls.canTestVoice;
   ui.play.disabled = (!controls.canPlay && !canResumePreview) || isGenerating;
   ui.pause.disabled = !controls.canPause;
   const playLabel = snapshot.status === "paused" || snapshot.status === "interrupted" ? "Reanudar"
@@ -240,6 +293,60 @@ function handleModelMessage(message) {
   }
   ui.engineState.textContent = modelLabel();
   ui.engineState.dataset.state = modelState;
+  updateVoiceProviderUI();
+  renderPlayer(player.snapshot());
+}
+
+function ensureStoredVoiceOption(voiceId) {
+  if (!isSystemVoiceId(voiceId) || [...ui.voice.options].some((option) => option.value === voiceId)) return;
+  const group = ui.voice.querySelector("#system-voice-options");
+  if (!group) return;
+  const option = document.createElement("option");
+  option.value = voiceId;
+  option.disabled = true;
+  option.textContent = "Voz del sistema guardada · no disponible";
+  group.append(option);
+}
+
+function selectVoice(voiceId) {
+  if (!voiceId) return;
+  ensureStoredVoiceOption(voiceId);
+  if ([...ui.voice.options].some((option) => option.value === voiceId)) ui.voice.value = voiceId;
+  updateVoiceProviderUI();
+}
+
+async function refreshSystemVoices() {
+  const group = ui.voice.querySelector("#system-voice-options");
+  try {
+    systemVoices = await systemVoiceCatalog.listVoices();
+    const selectedBeforeRefresh = ui.voice.value;
+    if (group) {
+      group.replaceChildren();
+      for (const voice of systemVoices) {
+        const option = document.createElement("option");
+        option.value = voice.id;
+        option.textContent = `Español · ${voice.label} · voz del sistema`;
+        group.append(option);
+      }
+      if (!systemVoices.length && !isSystemVoiceId(selectedBeforeRefresh)) {
+        const option = document.createElement("option");
+        option.value = "system-voices-unavailable";
+        option.disabled = true;
+        option.textContent = "No se encontraron voces españolas";
+        group.append(option);
+      }
+    }
+    ensureStoredVoiceOption(selectedBeforeRefresh);
+    if (selectedBeforeRefresh && [...ui.voice.options].some((option) => option.value === selectedBeforeRefresh)) {
+      ui.voice.value = selectedBeforeRefresh;
+    }
+  } catch (error) {
+    const selectedBeforeRefresh = ui.voice.value;
+    systemVoices = [];
+    ensureStoredVoiceOption(selectedBeforeRefresh);
+    ui.modelStatus.textContent = `No se pudieron consultar las voces españolas del sistema: ${error.message}`;
+  }
+  updateVoiceProviderUI();
   renderPlayer(player.snapshot());
 }
 
@@ -784,51 +891,41 @@ async function refreshModelCacheState() {
 }
 
 async function initializeModel() {
+  if (isSystemVoiceId(ui.voice.value)) return false;
   if (initializationPromise) return initializationPromise;
   modelState = "loading";
-  ui.install.disabled = true;
-  ui.engineState.textContent = modelLabel();
-  ui.engineState.dataset.state = modelState;
   ui.modelStatus.textContent = "Cargando Kokoro y sus recursos locales bajo demanda.";
   ui.downloadProgress.hidden = false;
   ui.downloadProgress.removeAttribute("value");
+  updateVoiceProviderUI();
   renderPlayer(player.snapshot());
 
-  inferenceWorker ||= new KokoroWorkerClient();
   initializationPromise = (async () => {
     const result = await attemptInitialization(
-      () => inferenceWorker.initialize((event) => {
-        if (event?.status === "progress" && Number.isFinite(event.progress)) {
-          ui.downloadProgress.value = event.progress;
-          ui.modelStatus.textContent = `Descargando ${event.file || "modelo"}: ${Math.round(event.progress)}%`;
-        } else if (event?.status === "done") ui.modelStatus.textContent = `Recurso local listo: ${event.file || "modelo"}`;
-      }),
-      (state) => { if (state === "loading" || state === "error") modelState = state; }
+      () => player.initialize(ui.voice.value),
+      (state) => {
+        if (state === "loading" || state === "error") modelState = state;
+        updateVoiceProviderUI();
+      }
     );
     if (!result.ok) throw result.error;
-    await inferenceWorker.dispose();
-    inferenceWorker = null;
     modelState = "ready";
     await chrome.storage.local.set({ modelCached: true });
-    ui.modelStatus.textContent = "Modelo y voces locales preparados. La memoria de inferencia se carga al iniciar la lectura.";
-    ui.install.textContent = "Modelo preparado";
+    ui.modelStatus.textContent = "Modelo Kokoro preparado. Los WAV ingleses se guardan y exportan desde este dispositivo.";
     ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
     renderPlayer(player.snapshot());
     return true;
-  })().catch(async (error) => {
-    await inferenceWorker?.dispose().catch(() => {});
-    inferenceWorker = null;
+  })().catch((error) => {
     modelState = "error";
-    ui.engineState.textContent = modelLabel();
-    ui.engineState.dataset.state = modelState;
     ui.modelStatus.textContent = `${error.message || "No se pudo inicializar Kokoro."} Puedes reintentar. El texto permanece en este dispositivo.`;
-    ui.install.textContent = "Reintentar carga local";
     ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
     renderPlayer(player.snapshot());
     return false;
   }).finally(() => {
     initializationPromise = null;
-    ui.install.disabled = modelState === "ready";
+    updateVoiceProviderUI();
   });
   return initializationPromise;
 }
@@ -877,7 +974,7 @@ async function activateDocument(document, preferredSessionId = null, internal = 
   };
   editingForked = false;
   ui.text.value = editorText;
-  if (currentSession.voice && [...ui.voice.options].some((option) => option.value === currentSession.voice && !option.disabled)) ui.voice.value = currentSession.voice;
+  selectVoice(currentSession.voiceId || currentSession.voice);
   if (currentSession.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(currentSession.speed))) ui.speed.value = String(currentSession.speed);
   ui.fileStatus.textContent = document.name ? `Documento guardado · ${document.name}` : "Texto local recuperado.";
   player.setSession(currentSession);
@@ -924,7 +1021,7 @@ async function activateSession(session, internal = false, { skipFlush = false } 
   currentSession = selected;
   editingForked = false;
   ui.text.value = selected.sourceText || document?.text || "";
-  if ([...ui.voice.options].some((option) => option.value === selected.voice && !option.disabled)) ui.voice.value = selected.voice;
+  selectVoice(selected.voiceId || selected.voice);
   if ([...ui.speed.options].some((option) => Number(option.value) === Number(selected.speed))) ui.speed.value = String(selected.speed);
   ui.fileStatus.textContent = `Sesión recuperada · ${selected.sourceDocumentName || document?.name || "lectura guardada"}`;
   player.setSession(currentSession);
@@ -1139,8 +1236,9 @@ async function deleteRecoveredLibraryEntry(entry) {
 
 async function boot() {
   await repository.cleanEmptyDocuments();
+  void refreshSystemVoices();
   const preferences = await chrome.storage.local.get(["lastDocumentId", "lastSessionId", "lastVoice", "speed"]);
-  if (preferences.lastVoice && [...ui.voice.options].some((option) => option.value === preferences.lastVoice && !option.disabled)) ui.voice.value = preferences.lastVoice;
+  if (preferences.lastVoice) selectVoice(preferences.lastVoice);
   if (preferences.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(preferences.speed))) ui.speed.value = String(preferences.speed);
   const preferredSession = preferences.lastSessionId ? await repository.getSession(preferences.lastSessionId) : null;
   currentDocument = preferences.lastDocumentId ? await repository.getDocument(preferences.lastDocumentId) : null;
@@ -1351,19 +1449,22 @@ ui.speed.addEventListener("change", () => {
   queuePersistence(false);
 });
 ui.voice.addEventListener("change", () => {
-  if (currentSession) currentSession = { ...currentSession, voice: ui.voice.value, audioKeys: [] };
+  if (currentSession) currentSession = { ...currentSession, ...voiceSessionFields(ui.voice.value), audioKeys: [], durations: currentSession.chunks.map(() => null) };
   void chrome.storage.local.set({ lastVoice: ui.voice.value });
   if (currentSession) void player.setVoice(ui.voice.value).catch(showError);
+  updateVoiceProviderUI();
+  renderPlayer(player.snapshot());
   queuePersistence(false);
 });
 
 ui.install.addEventListener("click", () => { void initializeModel(); });
+ui.refreshVoices.addEventListener("click", () => { void refreshSystemVoices(); });
 ui.test.addEventListener("click", () => {
-  if (!["ready", "cached"].includes(modelState)) return;
+  if (!readerControls().canTestVoice) return;
   void player.preview(ui.voice.value).catch(showError);
 });
 ui.play.addEventListener("click", () => {
-  if (!["ready", "cached"].includes(modelState)) return;
+  if (!readerControls().canPlay) return;
   void flushPersistence().then(() => player.play()).catch(showError);
 });
 ui.pause.addEventListener("click", () => { void player.pause().catch(showError); });
@@ -1407,17 +1508,13 @@ ui.deleteModel.addEventListener("click", async () => {
   if (!confirm("Eliminar únicamente el modelo y las voces locales? Los documentos, sesiones y audios se conservarán.")) return;
   try {
     await player.stop().catch(() => {});
-    await inferenceWorker?.dispose();
-    inferenceWorker = null;
     await player.deleteModel().catch(() => {});
     await caches.delete("edge-local-reader-kokoro-v1");
     await caches.delete("kokoro-voices");
     await chrome.storage.local.remove("modelCached");
     modelState = "idle";
-    ui.engineState.textContent = modelLabel();
-    ui.engineState.dataset.state = modelState;
     ui.modelStatus.textContent = "Modelo local eliminado. Los documentos y la lectura guardada permanecen.";
-    ui.install.textContent = "Descargar modelo local";
+    updateVoiceProviderUI();
     renderPlayer(player.snapshot());
     await refreshStorageUsage();
   } catch (error) { showError(error); }

@@ -1,10 +1,11 @@
-export function deriveReaderControls(modelState, chunkCount, audioPlaying = false) {
+export function deriveReaderControls(modelState, chunkCount, audioPlaying = false, { provider = "kokoro", systemVoiceAvailable = false } = {}) {
   const modelReady = modelState === "ready";
+  const providerReady = provider === "speechSynthesis" ? systemVoiceAvailable : modelReady;
   return {
-    canInitialize: modelState !== "loading" && !modelReady,
-    canPlay: modelReady && chunkCount > 0,
-    canTestVoice: modelReady,
-    canPause: modelReady && audioPlaying
+    canInitialize: provider === "kokoro" && modelState !== "loading" && !modelReady,
+    canPlay: providerReady && chunkCount > 0,
+    canTestVoice: providerReady,
+    canPause: providerReady && audioPlaying
   };
 }
 
