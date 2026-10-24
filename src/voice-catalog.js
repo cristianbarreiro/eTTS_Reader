@@ -39,6 +39,8 @@ export function systemVoiceRecord(voice) {
     gender: null,
     provider: "speechSynthesis",
     providerVoiceId: systemVoiceIdentity(voice),
+    localService: typeof voice?.localService === "boolean" ? voice.localService : null,
+    connection: voice?.localService === true ? "local" : voice?.localService === false ? "online" : "unknown",
     modelId: null,
     license: "Voz instalada y administrada por Edge/Windows"
   };

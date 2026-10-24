@@ -30,8 +30,8 @@ class FakeSpeechSynthesis {
 }
 
 const spanishVoices = [
-  { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina" },
-  { name: "Microsoft Jorge", lang: "es-ES", voiceURI: "urn:voice:jorge" },
+  { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina", localService: false },
+  { name: "Microsoft Jorge", lang: "es-ES", voiceURI: "urn:voice:jorge", localService: true },
   { name: "Microsoft David", lang: "en-US", voiceURI: "urn:voice:david" }
 ];
 
@@ -45,6 +45,23 @@ test("system speech waits for voiceschanged and lists only installed Spanish voi
   assert.equal(voices.length, 2);
   assert.ok(voices.every((voice) => voice.provider === "speechSynthesis" && voice.language === "es"));
   assert.ok(voices.every((voice) => voice.gender === null));
+  assert.equal(voices.find((voice) => voice.name === "Microsoft Sabina").connection, "online");
+  assert.equal(voices.find((voice) => voice.name === "Microsoft Jorge").connection, "local");
+});
+
+test("catalog updates on voiceschanged and marks voices that disappear without disrupting speech", async () => {
+  const api = new FakeSpeechSynthesis(spanishVoices);
+  const provider = new SystemSpeechProvider({ speechSynthesis: api, Utterance: FakeUtterance });
+  let updated;
+  provider.onCatalogChange((voices) => { updated = voices; });
+  const selected = (await provider.listVoices()).find((voice) => voice.name === "Microsoft Sabina");
+  const result = await provider.synthesize("Hola", selected.id);
+  provider.play(result);
+  api.voices = [spanishVoices[1]];
+  api.emit("voiceschanged");
+  assert.equal(provider.voiceStatus(selected.id), "unavailable");
+  assert.equal(api.current.text, "Hola", "refreshing the list must not cancel an active utterance");
+  assert.equal(updated.length, 1);
 });
 
 test("system speech validates the selected voice, applies rate, forwards playback events and cancels safely", async () => {
@@ -75,6 +92,7 @@ test("system speech validates the selected voice, applies rate, forwards playbac
 
   provider.cancel();
   assert.deepEqual(events, ["start", "pause", "resume", "boundary:5/12"], "a canceled utterance must not be reported as a playback error");
+  assert.equal(provider.voiceStatus(voice.id), "interrupted");
   await assert.rejects(provider.synthesize("Hola", "system:missing"), /ya no está disponible/);
 });
 
@@ -86,7 +104,8 @@ test("system speech reports non-cancellation playback failures", async () => {
   const errors = [];
   provider.play(result, { onError: (error) => errors.push(error.message) });
   api.current.onerror({ error: "audio-busy" });
-  assert.deepEqual(errors, [`SpeechSynthesis: audio-busy · ${voice.name} · ${voice.locale} · voz del sistema`]);
+  assert.deepEqual(errors, [`El motor de audio está ocupado. Espera y vuelve a intentarlo. · ${voice.name} · ${voice.locale} · voz local`]);
+  assert.equal(provider.voiceStatus(voice.id), "temporary-failure");
 });
 
 test("system speech diagnostics identify the selected voice without exposing the spoken text", async () => {
@@ -98,8 +117,28 @@ test("system speech diagnostics identify the selected voice without exposing the
   provider.play(result, { onError: (error) => errors.push(error.message) });
   api.current.onerror({ error: "synthesis-failed" });
 
-  assert.deepEqual(errors, [`SpeechSynthesis: synthesis-failed · ${voice.name} · ${voice.locale} · voz en línea`]);
+  assert.deepEqual(errors, [`El motor de voz no pudo completar la síntesis. · ${voice.name} · ${voice.locale} · voz en línea`]);
   assert.doesNotMatch(errors[0], /private text/);
+  assert.equal(provider.voiceStatus(voice.id), "temporary-failure");
+});
+
+test("a voice is marked successful only on end and can be retried after a temporary failure", async () => {
+  const api = new FakeSpeechSynthesis(spanishVoices);
+  const provider = new SystemSpeechProvider({ speechSynthesis: api, Utterance: FakeUtterance });
+  const [voice] = await provider.listVoices();
+  const result = await provider.synthesize("Hola", voice.id);
+  const errors = [];
+  provider.play(result, { onError: (error) => errors.push(error) });
+  assert.equal(provider.voiceStatus(voice.id), "pending-test");
+  api.current.onerror({ error: "network" });
+  assert.equal(provider.voiceStatus(voice.id), "temporary-failure");
+  assert.match(errors[0].message, /conexión/);
+  const retry = await provider.synthesize("Hola", voice.id);
+  provider.play(retry);
+  api.current.onstart();
+  assert.equal(provider.voiceStatus(voice.id), "pending-test");
+  api.current.onend();
+  assert.equal(provider.voiceStatus(voice.id), "tested-successfully");
 });
 
 test("an external system interruption reaches the player as an error", async () => {
@@ -110,7 +149,8 @@ test("an external system interruption reaches the player as an error", async () 
   const errors = [];
   provider.play(result, { onError: (error) => errors.push(error.message) });
   api.current.onerror({ error: "interrupted" });
-  assert.deepEqual(errors, ["La reproducción de la voz del sistema fue interrumpida."]);
+  assert.match(errors[0], /interrumpida/);
+  assert.equal(provider.voiceStatus(voice.id), "interrupted");
 });
 
 test("system speech reports a voice that never starts instead of leaving playback pending", async () => {
@@ -128,4 +168,5 @@ test("system speech reports a voice that never starts instead of leaving playbac
   assert.equal(provider.currentUtterance, null);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /no confirmó el inicio/);
+  assert.equal(provider.voiceStatus(voice.id), "temporary-failure");
 });

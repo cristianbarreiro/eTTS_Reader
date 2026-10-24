@@ -9,7 +9,7 @@ import {
 } from "../src/voice-catalog.js";
 
 test("system voice catalog filters to Spanish and does not guess gender", () => {
-  const spanish = { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina" };
+  const spanish = { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina", localService: false };
   const catalog = spanishSystemVoiceCatalog([
     spanish,
     { ...spanish },
@@ -23,6 +23,8 @@ test("system voice catalog filters to Spanish and does not guess gender", () => 
   assert.equal(catalog[0].locale, "es-MX");
   assert.equal(catalog[0].gender, null);
   assert.equal(catalog[0].provider, "speechSynthesis");
+  assert.equal(catalog[0].localService, false);
+  assert.equal(catalog[0].connection, "online");
   assert.ok(isSystemVoiceId(catalog[0].id));
   assert.equal(getVoiceProvider(catalog[0].id), "speechSynthesis");
 });

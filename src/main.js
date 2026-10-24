@@ -164,11 +164,27 @@ function updateVoiceProviderUI() {
   const systemVoice = systemVoices.find((voice) => voice.id === selected);
   const isSystem = isSystemVoiceId(selected);
   if (isSystem) {
-    ui.engineState.textContent = systemVoice ? "Voz del sistema" : "Voz del sistema no disponible";
+    const location = systemVoice?.localService === true ? "local" : systemVoice?.localService === false ? "en línea" : "sistema";
+    const statusLabels = {
+      registered: "registrada · pendiente de prueba",
+      "pending-test": "prueba en curso",
+      "tested-successfully": "probada en esta sesión",
+      "temporary-failure": "falló temporalmente · reintenta",
+      interrupted: "prueba interrumpida",
+      unavailable: "ya no disponible"
+    };
+    ui.engineState.textContent = systemVoice ? `${location} · ${statusLabels[systemVoice.status] || "registrada"}` : "Voz del sistema no disponible";
     ui.engineState.dataset.state = systemVoice ? "system" : "error";
-    ui.voiceNote.textContent = systemVoice
-      ? `${systemVoice.label} · gestionada por Edge/Windows. El sistema podría procesar texto mediante sus servicios. Usa Kokoro para síntesis local; SpeechSynthesis no exporta WAV.`
-      : "Esta voz guardada ya no aparece en Edge/Windows. Actualiza la lista o selecciona otra voz.";
+    const sessionVoiceId = currentSession?.voice || currentSession?.voiceId;
+    const missingSessionVoice = isSystemVoiceId(sessionVoiceId) && !systemVoices.some((voice) => voice.id === sessionVoiceId);
+    const failureAction = systemVoice?.status === "temporary-failure"
+      ? "Pulsa Probar voz para reintentar, Actualizar voces para volver a consultar Edge o elige otra voz."
+      : "";
+    ui.voiceNote.textContent = missingSessionVoice
+      ? "La sesión guardada depende de una voz que Edge ya no anuncia. Su ID y la sesión se conservaron; elige otra voz para continuar."
+      : systemVoice
+        ? `${systemVoice.label} · ${location === "sistema" ? "tipo de conexión desconocido" : `servicio ${location}`} · ${statusLabels[systemVoice.status] || "registrada por Edge"}. La aparición en la lista no garantiza síntesis. ${failureAction} Usa Kokoro para voz local inglesa; SpeechSynthesis no exporta WAV.`
+        : "Esta voz guardada ya no aparece en Edge/Windows. Actualiza la lista o selecciona otra voz.";
     ui.privacyNote.textContent = "Voz del sistema: el texto se entrega a Edge/Windows y podría procesarse mediante sus servicios. Usa Kokoro si necesitas síntesis local.";
     ui.modelStatus.textContent = systemVoice
       ? "Sin descarga de modelo. El modo sin conexión depende de la voz y la configuración del sistema; no se puede garantizar."
@@ -179,7 +195,11 @@ function updateVoiceProviderUI() {
   }
   ui.engineState.textContent = kokoroEngineLabel(modelState);
   ui.engineState.dataset.state = modelState;
-  ui.voiceNote.textContent = "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
+  const sessionVoiceId = currentSession?.voice || currentSession?.voiceId;
+  const missingSessionVoice = isSystemVoiceId(sessionVoiceId) && !systemVoices.some((voice) => voice.id === sessionVoiceId);
+  ui.voiceNote.textContent = missingSessionVoice
+    ? "La sesión guardada depende de una voz que Edge ya no anuncia. Su ID y la sesión se conservaron; puedes seleccionar Kokoro para inglés o elegir otra voz del sistema."
+    : "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
   ui.privacyNote.textContent = "Con Kokoro, el texto se sintetiza localmente; la red solo se usa para descargar los pesos solicitados.";
   ui.install.disabled = ["loading", "ready"].includes(modelState);
   ui.install.textContent = ({
@@ -233,6 +253,15 @@ function describePlayer(snapshot) {
 }
 
 function renderPlayer(snapshot) {
+  if (snapshot.activeProvider === "speechSynthesis" && snapshot.activeVoiceId) {
+    const status = snapshot.status === "completed" ? "tested-successfully"
+      : snapshot.status === "error" ? "temporary-failure"
+        : ["starting", "playing", "paused"].includes(snapshot.status) ? "pending-test" : null;
+    if (status) {
+      systemVoiceCatalog.setVoiceStatus(snapshot.activeVoiceId, status);
+      systemVoices = systemVoices.map((voice) => voice.id === snapshot.activeVoiceId ? { ...voice, status } : voice);
+    }
+  }
   updateVoiceProviderUI();
   const chunkCount = snapshot.chunks.length;
   const hasText = chunkCount > 0;
@@ -376,7 +405,9 @@ async function refreshSystemVoices() {
       for (const voice of systemVoices) {
         const option = document.createElement("option");
         option.value = voice.id;
-        option.textContent = `Español · ${voice.label} · voz del sistema`;
+        const connection = voice.localService === true ? "Local" : voice.localService === false ? "En línea" : "Sistema";
+        const state = ({ registered: "pendiente de prueba", "pending-test": "probando", "tested-successfully": "probada", "temporary-failure": "fallo temporal", interrupted: "interrumpida" })[voice.status] || "registrada";
+        option.textContent = `Español · ${voice.name} · ${voice.locale} · ${connection} · ${state}`;
         group.append(option);
       }
       if (!systemVoices.length && !isSystemVoiceId(selectedBeforeRefresh)) {
@@ -400,6 +431,8 @@ async function refreshSystemVoices() {
   updateVoiceProviderUI();
   renderPlayer(player.snapshot());
 }
+
+systemVoiceCatalog.onCatalogChange(() => { void refreshSystemVoices(); });
 
 function updateTextInfo() {
   const text = ui.text.value;
