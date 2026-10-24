@@ -151,6 +151,18 @@
       <p id="library-status" class="status-line" role="status" aria-live="polite"></p>
     </details>
 
+    <dialog id="library-confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="library-confirm-title" aria-describedby="library-confirm-message">
+      <div class="confirm-dialog-content">
+        <h2 id="library-confirm-title" class="confirm-dialog-title"></h2>
+        <p id="library-confirm-message" class="confirm-dialog-message"></p>
+        <p id="library-confirm-status" class="confirm-dialog-status" role="alert" aria-live="assertive" tabindex="-1" hidden></p>
+        <div class="confirm-dialog-actions">
+          <button id="library-confirm-cancel" class="confirm-dialog-cancel" type="button">Cancelar</button>
+          <button id="library-confirm-accept" class="confirm-dialog-danger" type="button">Eliminar</button>
+        </div>
+      </div>
+    </dialog>
+
     <p class="background-note">La lectura puede continuar mientras se oculta el panel. Si Edge cierra el contexto, la sesión queda guardada para reanudar.</p>
   </main>
   <script type="module" src="/src/main.js"></script>

@@ -12,6 +12,16 @@ import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentatio
 import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "./player-presentation.js";
 import { createTabFaviconPresenter, safeTabTitle } from "./tab-card-presentation.js";
 import { playbackQueueMatchesEditor, preparePlaybackQueue } from "./playback-queue.js";
+import { createConfirmAction } from "./confirm-action.js";
+import {
+  documentDeleteConfirmation,
+  kokoroModelDeleteConfirmation,
+  piperModelDeleteConfirmation,
+  recoveredSessionsDeleteConfirmation,
+  savedAudioDeleteConfirmation,
+  sessionDeleteConfirmation
+} from "./library-confirmation.js";
+import { isAudioStorageBusy, isProviderVoiceInUse, storageOperationBusyError, storageOperationBusyMessage } from "./storage-safety.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
@@ -19,6 +29,9 @@ const ui = {
   fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
   library: $("#library-details"), librarySummary: $("#library-summary-count"), libraryList: $("#library-list"),
   libraryStatus: $("#library-status"),
+  confirmDialog: $("#library-confirm-dialog"), confirmTitle: $("#library-confirm-title"),
+  confirmMessage: $("#library-confirm-message"), confirmStatus: $("#library-confirm-status"),
+  confirmCancel: $("#library-confirm-cancel"), confirmAccept: $("#library-confirm-accept"),
   loadPlayer: $("#load-player"), queueSyncStatus: $("#queue-sync-status"),
   appAlert: $("#app-alert"), appAlertMessage: $("#app-alert-message"), errorDetails: $("#app-error-details"), errorTechnical: $("#app-error-technical"), dismissAppAlert: $("#dismiss-app-alert"),
   sourceCard: $("#source-card"), activeTabKind: $("#active-tab-kind"), activeTabDomain: $("#active-tab-domain"),
@@ -36,6 +49,17 @@ const ui = {
   downloadAudio: $("#download-audio"), clearText: $("#clear-text"), deleteAudioCache: $("#delete-audio-cache"), deleteModel: $("#delete-model"), deletePiperModel: $("#delete-piper-model"),
   storageUsage: $("#storage-usage")
 };
+
+const confirmDestructiveAction = createConfirmAction({
+  dialog: ui.confirmDialog,
+  titleElement: ui.confirmTitle,
+  messageElement: ui.confirmMessage,
+  statusElement: ui.confirmStatus,
+  cancelButton: ui.confirmCancel,
+  confirmButton: ui.confirmAccept,
+  document,
+  fallbackFocus: () => document.querySelector("#library-details > summary") || document.querySelector("#model-management > summary")
+});
 
 const repository = new ReaderRepository();
 const presentTabFavicon = createTabFaviconPresenter(ui.activeTabFavicon, ui.activeTabFaviconFallback);
@@ -90,6 +114,43 @@ const player = new ReaderClient({
   },
   onModel: handleModelMessage
 });
+
+function assertAudioCacheCanBeCleared() {
+  if (isAudioStorageBusy(player.snapshot())) {
+    throw storageOperationBusyError("La lectura o síntesis está en curso. Espera a que termine antes de eliminar los audios guardados.");
+  }
+}
+
+function assertProviderCanBeRemoved(provider, voiceId = null) {
+  const voiceState = voiceId ? piperStates.get(voiceId) : null;
+  const operationPending = provider === "kokoro"
+    ? modelState === "loading" || Boolean(initializationPromise)
+    : voiceState?.state === "loading" || piperInstallPromises.has(voiceId);
+  if (operationPending) {
+    throw storageOperationBusyError(`El motor ${provider === "piper" ? "Piper" : "Kokoro"} está preparando la voz. Espera a que termine y vuelve a intentarlo.`);
+  }
+
+  if (isProviderVoiceInUse({
+    snapshot: player.snapshot(),
+    session: player.session,
+    selectedVoiceId: ui.voice.value,
+    provider,
+    voiceId
+  })) {
+    throw storageOperationBusyError("La lectura o muestra está usando este modelo. Espera a que termine y vuelve a intentarlo.");
+  }
+}
+
+function storageConfirmationError(error, action, retryMessage) {
+  const busyMessage = storageOperationBusyMessage(error);
+  if (busyMessage) {
+    if (action === "model") ui.modelStatus.textContent = busyMessage;
+    else ui.fileStatus.textContent = busyMessage;
+    return busyMessage;
+  }
+  showError(error, action);
+  return retryMessage;
+}
 
 function syncImportButtons() {
   const canImport = panelStatus.snapshot().tab.canImport;
@@ -1284,14 +1345,36 @@ async function activateSession(session, internal = false, { skipFlush = false } 
 
 async function deleteLibraryDocument(documentId) {
   if (libraryMutationBusy) return;
-  const document = await repository.getDocument(documentId);
-  if (!document) { if (ui.library.open) await refreshLibrary(); return; }
-  const dependentSessions = await repository.listSessions(documentId);
-  const warning = dependentSessions.length
-    ? ` Sus ${dependentSessions.length} sesiones conservarán su copia de texto, progreso y audios como lecturas independientes.`
-    : " No hay sesiones asociadas.";
-  if (!confirm(`¿Eliminar el documento “${document.name}”?${warning} El modelo local no se eliminará.`)) return;
-  if (libraryMutationBusy) return;
+  let document;
+  let dependentSessions;
+  try {
+    document = await repository.getDocument(documentId);
+    if (!document) { if (ui.library.open) await refreshLibrary(); return false; }
+    dependentSessions = await repository.listSessions(documentId);
+  } catch (error) {
+    ui.libraryStatus.textContent = showError(error, "library");
+    return false;
+  }
+
+  try {
+    return await confirmDestructiveAction({
+      ...documentDeleteConfirmation(document, dependentSessions),
+      busyLabel: "Eliminando…",
+      failureMessage: "No se pudo completar la eliminación. Revisa el estado de la biblioteca e inténtalo de nuevo.",
+      onConfirm: () => performLibraryDocumentDelete(documentId, document, dependentSessions),
+      onError: (error) => {
+        ui.libraryStatus.textContent = showError(error, "library");
+        return ui.libraryStatus.textContent;
+      }
+    });
+  } catch (error) {
+    ui.libraryStatus.textContent = showError(error, "library");
+    return false;
+  }
+}
+
+async function performLibraryDocumentDelete(documentId, document, dependentSessions) {
+  if (libraryMutationBusy) return false;
 
   libraryMutationBusy = true;
   setContentBusy(true);
@@ -1303,19 +1386,19 @@ async function deleteLibraryDocument(documentId) {
   const previousDocument = currentDocument;
   const previousSession = currentSession;
   let documentDeleted = false;
-  if (wasActive) {
-    fileReadId++;
-    ui.text.disabled = true;
-    ui.file.disabled = true;
-    ui.chooseSourceFile.disabled = true;
-    await flushPersistence();
-    clearTimeout(persistTimer);
-    currentDocument = null;
-    currentSession = null;
-    ui.text.value = "";
-    player.setSession(null);
-  }
   try {
+    if (wasActive) {
+      fileReadId++;
+      ui.text.disabled = true;
+      ui.file.disabled = true;
+      ui.chooseSourceFile.disabled = true;
+      await flushPersistence();
+      clearTimeout(persistTimer);
+      currentDocument = null;
+      currentSession = null;
+      ui.text.value = "";
+      player.setSession(null);
+    }
     await Promise.all(dependentSessions.map((session) => player.forgetSession(session.id, true)));
     if (wasLoadedQueue && !wasActive) player.setSession(null);
     documentDeleted = await repository.deleteDocument(documentId);
@@ -1329,6 +1412,7 @@ async function deleteLibraryDocument(documentId) {
     }
     ui.libraryStatus.textContent = `Documento “${document.name}” eliminado.`;
     await refreshStorageUsage();
+    return true;
   } catch (error) {
     if (wasActive && !documentDeleted) {
       currentDocument = previousDocument;
@@ -1352,23 +1436,49 @@ async function deleteLibraryDocument(documentId) {
       ui.fileStatus.textContent = `Documento “${document.name}” eliminado; hubo un problema al actualizar la selección.`;
     }
     ui.libraryStatus.textContent = showError(error, "library");
+    return documentDeleted;
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
     ui.text.disabled = false;
     ui.file.disabled = false;
     ui.chooseSourceFile.disabled = false;
-    if (ui.library.open) await refreshLibrary();
+    if (ui.library.open) {
+      try { await refreshLibrary(); } catch (error) { ui.libraryStatus.textContent = showError(error, "library"); }
+    }
   }
 }
 
 async function deleteLibrarySession(sessionId) {
   if (libraryMutationBusy) return;
-  const session = await repository.getSession(sessionId);
-  if (!session) { if (ui.library.open) await refreshLibrary(); return; }
-  const name = session.sourceDocumentName || session.sourceText?.trim().slice(0, 48) || "Texto pegado";
-  if (!confirm(`¿Eliminar la sesión de lectura “${name}”? Se borrarán su progreso y los WAV que no use otra sesión. El documento y el modelo local se conservarán.`)) return;
-  if (libraryMutationBusy) return;
+  let session;
+  try {
+    session = await repository.getSession(sessionId);
+    if (!session) { if (ui.library.open) await refreshLibrary(); return false; }
+  } catch (error) {
+    ui.libraryStatus.textContent = showError(error, "library");
+    return false;
+  }
+
+  try {
+    return await confirmDestructiveAction({
+      ...sessionDeleteConfirmation(session),
+      busyLabel: "Eliminando…",
+      failureMessage: "No se pudo completar la eliminación. Revisa el estado de la biblioteca e inténtalo de nuevo.",
+      onConfirm: () => performLibrarySessionDelete(sessionId, session),
+      onError: (error) => {
+        ui.libraryStatus.textContent = showError(error, "library");
+        return ui.libraryStatus.textContent;
+      }
+    });
+  } catch (error) {
+    ui.libraryStatus.textContent = showError(error, "library");
+    return false;
+  }
+}
+
+async function performLibrarySessionDelete(sessionId, session) {
+  if (libraryMutationBusy) return false;
 
   libraryMutationBusy = true;
   setContentBusy(true);
@@ -1378,16 +1488,19 @@ async function deleteLibrarySession(sessionId) {
   if (wasActive) selectionEpoch++;
   const document = currentDocument;
   const editorText = ui.text.value;
-  if (wasActive) {
-    ui.text.disabled = true;
-    await flushPersistence();
-    clearTimeout(persistTimer);
-    currentSession = null;
-  }
+  const name = session.sourceDocumentName || session.sourceText?.trim().slice(0, 48) || "Texto pegado";
+  let sessionDeleted = false;
+  if (wasActive) ui.text.disabled = true;
   if (wasLoadedQueue) player.setSession(null);
   try {
+    if (wasActive) {
+      await flushPersistence();
+      clearTimeout(persistTimer);
+      currentSession = null;
+    }
     await player.forgetSession(sessionId, false);
     await repository.deleteSession(sessionId);
+    sessionDeleted = true;
     if (wasActive && document) {
       const nextSession = (await repository.listSessions(document.id))[0];
       if (nextSession) await activateSession(nextSession, true, { skipFlush: true });
@@ -1410,6 +1523,7 @@ async function deleteLibrarySession(sessionId) {
     }
     ui.libraryStatus.textContent = `Sesión “${name}” eliminada. Los audios compartidos y el modelo se conservaron.`;
     await refreshStorageUsage();
+    return true;
   } catch (error) {
     ui.libraryStatus.textContent = showError(error, "library");
     if (wasActive) {
@@ -1422,23 +1536,39 @@ async function deleteLibrarySession(sessionId) {
       const restoreQueue = await repository.getSession(sessionId).catch(() => null);
       if (restoreQueue?.id && restoreQueue.queuePrepared !== false) await player.connect(restoreQueue).catch(() => {});
     }
+    return sessionDeleted;
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
     ui.text.disabled = false;
-    if (ui.library.open) await refreshLibrary();
+    if (ui.library.open) {
+      try { await refreshLibrary(); } catch (error) { ui.libraryStatus.textContent = showError(error, "library"); }
+    }
   }
 }
 
 async function deleteRecoveredLibraryEntry(entry) {
   if (libraryMutationBusy || !entry?.sessions?.length) return;
   const sessions = [...entry.sessions];
-  const title = sessions[0].sourceDocumentName || "Lectura recuperada";
-  const message = sessions.length === 1
-    ? `¿Eliminar la sesión recuperada “${title}”? Se borrará su progreso y los WAV exclusivos; los audios compartidos y el modelo se conservarán.`
-    : `¿Eliminar las ${sessions.length} sesiones recuperadas de “${title}”? Se borrarán sus progresos y los WAV exclusivos; los audios compartidos y el modelo se conservarán.`;
-  if (!confirm(message)) return;
+  try {
+    return await confirmDestructiveAction({
+      ...recoveredSessionsDeleteConfirmation(sessions),
+      busyLabel: "Eliminando…",
+      failureMessage: "No se pudo completar la eliminación. Revisa el estado de la biblioteca e inténtalo de nuevo.",
+      onConfirm: () => performRecoveredLibrarySessionsDelete(sessions),
+      onError: (error) => {
+        ui.libraryStatus.textContent = showError(error, "library");
+        return ui.libraryStatus.textContent;
+      }
+    });
+  } catch (error) {
+    ui.libraryStatus.textContent = showError(error, "library");
+    return false;
+  }
+}
 
+async function performRecoveredLibrarySessionsDelete(sessions) {
+  if (libraryMutationBusy || !sessions.length) return false;
   libraryMutationBusy = true;
   setContentBusy(true);
   libraryRefreshEpoch++;
@@ -1446,18 +1576,20 @@ async function deleteRecoveredLibraryEntry(entry) {
   const wasActive = deletedIds.has(currentSession?.id);
   const wasLoadedQueue = deletedIds.has(player.session?.id);
   const editorText = ui.text.value;
-  if (wasActive) {
-    selectionEpoch++;
-    ui.text.disabled = true;
-    await flushPersistence();
-    clearTimeout(persistTimer);
-    currentSession = null;
-  }
+  let deletedCount = 0;
+  if (wasActive) selectionEpoch++;
+  if (wasActive) ui.text.disabled = true;
   if (wasLoadedQueue) player.setSession(null);
   try {
+    if (wasActive) {
+      await flushPersistence();
+      clearTimeout(persistTimer);
+      currentSession = null;
+    }
     for (const session of sessions) {
       await player.forgetSession(session.id, false);
       await repository.deleteSession(session.id);
+      deletedCount++;
     }
     if (wasActive) {
       if (currentDocument && editorText.trim()) {
@@ -1470,6 +1602,7 @@ async function deleteRecoveredLibraryEntry(entry) {
     }
     ui.libraryStatus.textContent = `${sessions.length === 1 ? "Sesión recuperada eliminada" : `${sessions.length} sesiones recuperadas eliminadas`}. Los audios compartidos y el modelo se conservaron.`;
     await refreshStorageUsage();
+    return true;
   } catch (error) {
     ui.libraryStatus.textContent = showError(error, "library");
     if (wasLoadedQueue) {
@@ -1481,11 +1614,14 @@ async function deleteRecoveredLibraryEntry(entry) {
         }
       }
     }
+    return deletedCount === sessions.length;
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
     ui.text.disabled = false;
-    if (ui.library.open) await refreshLibrary();
+    if (ui.library.open) {
+      try { await refreshLibrary(); } catch (error) { ui.libraryStatus.textContent = showError(error, "library"); }
+    }
   }
 }
 
@@ -1754,52 +1890,87 @@ ui.next.addEventListener("click", () => { void player.next().catch(showError); }
 ui.seek.addEventListener("input", () => { void player.seek(Number(ui.seek.value)).catch(showError); });
 
 ui.deleteAudioCache.addEventListener("click", async () => {
-  if (!confirm("Eliminar todos los WAV generados? Los documentos, sesiones y el modelo local se conservarán.")) return;
   try {
-    await player.clearAudioCache();
-    await repository.clearAudioCache();
-    const clearAudioReferences = (session) => {
-      if (!session) return null;
-      const chunkStates = (session.chunks || []).map((_, index) => session.chunkStates?.[index] === "error" ? "error" : "pending");
-      return { ...session, audioKeys: [], chunkStates, lastError: chunkStates.includes("error") ? session.lastError || "" : "" };
-    };
-    if (player.session) player.session = clearAudioReferences(player.session);
-    if (currentSession) currentSession = clearAudioReferences(currentSession);
-    await refreshDownloadLink(null);
-    await refreshStorageUsage();
-    ui.fileStatus.textContent = "Audios generados eliminados; documentos y sesiones conservados.";
-  } catch (error) { showError(error); }
+    await confirmDestructiveAction({
+      ...savedAudioDeleteConfirmation(),
+      busyLabel: "Eliminando audios…",
+      failureMessage: "No se pudieron eliminar los audios guardados. Puedes reintentar.",
+      onConfirm: async () => {
+        assertAudioCacheCanBeCleared();
+        await player.clearAudioCache();
+        const clearAudioReferences = (session) => {
+          if (!session) return null;
+          const chunkStates = (session.chunks || []).map((_, index) => session.chunkStates?.[index] === "error" ? "error" : "pending");
+          return { ...session, audioKeys: [], chunkStates, lastError: chunkStates.includes("error") ? session.lastError || "" : "" };
+        };
+        if (player.session) player.session = clearAudioReferences(player.session);
+        if (currentSession) currentSession = clearAudioReferences(currentSession);
+        await refreshDownloadLink(null);
+        try { await refreshStorageUsage(); } catch (error) { showError(error, "library"); }
+        if (ui.library.open) {
+          try { await refreshLibrary(); } catch (error) { ui.libraryStatus.textContent = showError(error, "library"); }
+        }
+        ui.fileStatus.textContent = "Audios generados eliminados; documentos, sesiones y modelos conservados.";
+        return true;
+      },
+      onError: (error) => storageConfirmationError(error, "library", "No se pudo completar la eliminación de los audios. Puedes reintentar.")
+    });
+  } catch (error) { showError(error, "library"); }
 });
 
 ui.deleteModel.addEventListener("click", async () => {
-  if (!confirm("Eliminar únicamente el modelo y las voces locales? Los documentos, sesiones y audios se conservarán.")) return;
   try {
-    await player.stop().catch(() => {});
-    await player.deleteModel().catch(() => {});
-    await caches.delete("edge-local-reader-kokoro-v1");
-    await caches.delete("kokoro-voices");
-    await chrome.storage.local.remove("modelCached");
-    modelState = "idle";
-    ui.modelStatus.textContent = "Modelo local eliminado. Los documentos y la lectura guardada permanecen.";
-    updateVoiceProviderUI();
-    renderPlayer(player.snapshot());
-    await refreshStorageUsage();
-  } catch (error) { showError(error); }
+    await confirmDestructiveAction({
+      ...kokoroModelDeleteConfirmation(),
+      busyLabel: "Eliminando Kokoro…",
+      failureMessage: "No se pudo completar la eliminación de Kokoro. Puedes reintentar.",
+      onConfirm: async () => {
+        assertProviderCanBeRemoved("kokoro");
+        await player.deleteModel();
+        modelState = "idle";
+        ui.modelStatus.textContent = "Modelo y recursos locales de Kokoro eliminados. Los modelos Piper, audios, documentos y sesiones se conservaron.";
+        updateVoiceProviderUI();
+        renderPlayer(player.snapshot());
+        try { await refreshStorageUsage(); } catch (error) { showError(error, "library"); }
+        return true;
+      },
+      onError: (error) => {
+        if (!storageOperationBusyMessage(error)) {
+          modelState = "error";
+          ui.modelStatus.textContent = "No se pudo confirmar la eliminación de Kokoro. Puedes reintentar.";
+          updateVoiceProviderUI();
+          renderPlayer(player.snapshot());
+        }
+        return storageConfirmationError(error, "model", "No se pudo completar la eliminación de Kokoro. El estado del modelo se conserva para que puedas reintentar.");
+      }
+    });
+  } catch (error) { showError(error, "model"); }
 });
 
 ui.deletePiperModel?.addEventListener("click", async () => {
   const voiceId = ui.voice.value;
   const voice = getVoiceRecord(voiceId);
   if (voice.provider !== "piper") return;
-  if (!confirm(`Eliminar únicamente el modelo ${voice.label} de este dispositivo? Los documentos, sesiones y audios generados se conservarán.`)) return;
   try {
-    await player.stop().catch(() => {});
-    await player.deletePiperModel(voiceId);
-    setPiperVoiceState(voiceId, { state: "idle", phase: "download", installed: false, error: "" });
-    ui.modelStatus.textContent = `Modelo ${voice.label} eliminado. Los audios WAV ya generados se conservaron.`;
-    updateVoiceProviderUI();
-    renderPlayer(player.snapshot());
-    await refreshStorageUsage();
+    await confirmDestructiveAction({
+      ...piperModelDeleteConfirmation(voice.label),
+      busyLabel: "Eliminando modelo…",
+      failureMessage: `No se pudo eliminar el modelo ${voice.label}. Puedes reintentar.`,
+      onConfirm: async () => {
+        assertProviderCanBeRemoved("piper", voiceId);
+        if (!piperStates.get(voiceId)?.installed) {
+          throw new Error(`El modelo ${voice.label} ya no figura como instalado. Actualiza su estado e inténtalo de nuevo.`);
+        }
+        await player.deletePiperModel(voiceId);
+        setPiperVoiceState(voiceId, { state: "idle", phase: "download", installed: false, error: "" });
+        ui.modelStatus.textContent = `Modelo ${voice.label} eliminado. Los audios WAV, documentos y sesiones se conservaron.`;
+        updateVoiceProviderUI();
+        renderPlayer(player.snapshot());
+        try { await refreshStorageUsage(); } catch (error) { showError(error, "library"); }
+        return true;
+      },
+      onError: (error) => storageConfirmationError(error, "model", `No se pudo completar la eliminación de ${voice.label}. El estado se mantiene para que puedas reintentar.`)
+    });
   } catch (error) { showError(error, "model"); }
 });
 

@@ -191,8 +191,8 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 
 .library-card { overflow: hidden; padding: 0; }
 .library-card > summary { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 13px; cursor: pointer; list-style: none; }
-.library-card > summary::after { content: "⌄"; flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: 15px; }
-.library-card[open] > summary::after { content: "⌃"; }
+.library-card > summary::after { content: ""; display: block; width: 18px; height: 18px; flex: 0 0 18px; align-self: center; margin-left: auto; background: var(--accent); clip-path: polygon(0 22%, 12% 10%, 50% 50%, 88% 10%, 100% 22%, 50% 78%); transform: rotate(0deg); transform-origin: 50% 50%; }
+.library-card[open] > summary::after { transform: rotate(180deg); }
 .library-title { font-size: 13px; font-weight: 700; }
 .library-card > summary .hint { margin: 0; font-size: 9px; font-weight: 400; text-align: right; }
 .library-group { padding: 0 12px 10px; border-top: 1px solid var(--border-soft); }
@@ -219,6 +219,25 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 .library-delete:hover:not(:disabled) { border-color: #ef4444; background: #7f1d1d; color: #fecaca; }
 .library-resume:focus-visible, .library-delete:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 #library-status:empty { display: none; }
+
+.confirm-dialog { width: min(380px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: calc(100vh - 32px); overflow: auto; padding: 0; margin: auto; border: 1px solid #3b4d65; border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 14px 36px #0008; }
+.confirm-dialog::backdrop { background: rgb(3 8 16 / 68%); }
+.confirm-dialog-content { padding: 17px; }
+.confirm-dialog-title { font-size: 15px; line-height: 1.35; }
+.confirm-dialog-message { margin: 8px 0 0; color: var(--muted-strong); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.confirm-dialog-status { padding: 8px 9px; margin: 10px 0 0; border: 1px solid #763d3b; border-radius: 8px; background: #321e24; color: #ffd6d1; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.confirm-dialog-status:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.confirm-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; margin-top: 15px; }
+.confirm-dialog-cancel, .confirm-dialog-danger { min-height: 36px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 10px; font-weight: 700; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+.confirm-dialog-cancel { background: var(--surface-raised); color: var(--muted-strong); }
+.confirm-dialog-cancel:hover:not(:disabled) { border-color: #59718e; background: #22364e; color: var(--text); }
+.confirm-dialog-danger { border-color: #9f3434; background: #7f1d1d; color: #ffe5e5; }
+.confirm-dialog-danger:hover:not(:disabled) { border-color: #ef4444; background: #991b1b; color: #fff; box-shadow: 0 0 0 1px rgb(239 68 68 / 18%); }
+.confirm-dialog[data-variant="default"] .confirm-dialog-danger { border-color: #2d6db4; background: #205da0; color: #f5f9ff; }
+.confirm-dialog[data-variant="default"] .confirm-dialog-danger:hover:not(:disabled) { border-color: #55a5f5; background: #2875c2; color: #fff; box-shadow: 0 0 0 1px rgb(83 164 244 / 18%); }
+.confirm-dialog-cancel:focus-visible, .confirm-dialog-danger:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.confirm-dialog-cancel:disabled, .confirm-dialog-danger:disabled { cursor: wait; opacity: .55; }
+.confirm-dialog[aria-busy="true"] .confirm-dialog-danger { cursor: wait; }
 
 .app-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; padding: 10px 11px; margin: -3px 0 12px; border: 1px solid #763d3b; border-radius: 11px; background: #321e24; color: #ffd6d1; }
 .app-alert-copy { min-width: 0; font-size: 11px; line-height: 1.45; }

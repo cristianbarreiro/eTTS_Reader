@@ -29,6 +29,11 @@ export class TTSProviderRouter {
   deletePiperModel(voiceId) { getVoiceRecord(voiceId); return this.piper.removeModel(voiceId); }
   listInstalledPiperModels() { return this.piper.listInstalled(); }
 
+  deleteKokoroModel() {
+    if (typeof this.kokoro.deleteModel !== "function") throw new Error("Kokoro no permite eliminar sus recursos locales de forma independiente.");
+    return this.kokoro.deleteModel();
+  }
+
   async dispose() {
     await Promise.allSettled([this.kokoro.dispose(), this.piper.dispose()]);
   }

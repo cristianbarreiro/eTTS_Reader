@@ -715,12 +715,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.command === "replace") return sendOffscreen("replace", message.payload || {}, { create: true });
     if (message.command === "delete-model") {
-      const result = await sendOffscreen("close-idle", {}, { create: false });
+      const result = await sendOffscreen("delete-model", {}, { create: true });
       return result;
     }
     const needsContext = [
       "start", "preview", "initialize", "restore", "piper-catalog", "piper-model-status",
-      "list-installed-piper-models", "install-piper-model", "delete-piper-model"
+      "list-installed-piper-models", "install-piper-model", "delete-piper-model", "clear-audio-cache"
     ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };

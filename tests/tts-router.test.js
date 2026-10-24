@@ -52,3 +52,15 @@ test("router rejects unknown and cross-provider voice IDs without silently falli
   await assert.rejects(router.synthesize("Hola", "not-a-voice"), /desconocido/);
   assert.deepEqual(calls, []);
 });
+
+test("Kokoro removal deletes only its own resources without disposing Piper", async () => {
+  const calls = [];
+  const router = new TTSProviderRouter({
+    kokoro: { async initialize() {}, async synthesize() {}, async dispose() {}, async deleteModel() { calls.push("kokoro:delete-model"); } },
+    piper: { async initialize() {}, async synthesize() {}, async removeModel() {}, async dispose() { calls.push("piper:dispose"); } }
+  });
+
+  await router.deleteKokoroModel();
+  assert.deepEqual(calls, ["kokoro:delete-model"]);
+  assert.equal(calls.filter((name) => name === "piper:dispose").length, 0);
+});

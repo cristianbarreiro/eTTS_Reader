@@ -79,7 +79,10 @@ export class ReaderClient {
     const response = await this.runtime.sendMessage({ target: "background", command, payload });
     if (response?.ok === false) throw new Error(response.error || "Falló el motor local de lectura.");
     if (response?.snapshot && (!response.sessionId || response.sessionId === this.session?.id)) {
-      this.state = { ...response.snapshot, currentAudioKey: response.currentAudioKey || this.session?.audioKeys?.[response.snapshot.selectedIndex] || null, downloadUrl: null };
+      const currentAudioKey = command === "clear-audio-cache"
+        ? null
+        : response.currentAudioKey || this.session?.audioKeys?.[response.snapshot.selectedIndex] || null;
+      this.state = { ...response.snapshot, currentAudioKey, downloadUrl: null };
       this.onState(this.snapshot());
     }
     return response || { ok: true };

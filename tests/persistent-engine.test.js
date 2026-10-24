@@ -48,6 +48,16 @@ class MemoryRepository {
   async getAudioChunk(id) { return this.audio.get(id); }
   async saveAudioChunk(record) { this.audio.set(record.id, record); return record; }
   async saveSession(record) { this.sessions.set(record.id, { ...record }); return record; }
+  async clearAudioCache() {
+    this.audio.clear();
+    for (const [id, session] of this.sessions) {
+      this.sessions.set(id, {
+        ...session,
+        audioKeys: [],
+        chunkStates: (session.chunks || []).map((_, index) => session.chunkStates?.[index] === "error" ? "error" : "pending")
+      });
+    }
+  }
 }
 
 const delay = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -228,20 +238,141 @@ test("generation failures persist their chunk error and restore without autoplay
   assert.equal(second.audio.playCount, 0);
 });
 
-test("explicit audio-cache deletion clears persisted references without stopping active playback", async () => {
+test("audio-cache deletion refuses to remove WAVs while playback is using the reader", async () => {
   const repository = new MemoryRepository();
   const { audio, engine } = makeEngine(repository);
   await engine.handleCommand({ command: "start", session: { ...session(), chunks: ["First."], sourceText: "First." } });
   await waitFor(() => repository.audio.size === 1);
+  await waitFor(() => repository.sessions.get("session-a")?.audioKeys?.length === 1);
 
-  await engine.handleCommand({ command: "clear-audio-cache" });
-  repository.audio.clear();
-  const saved = repository.sessions.get("session-a");
+  await assert.rejects(engine.handleCommand({ command: "clear-audio-cache" }), /STORAGE_OPERATION_BUSY/);
   assert.equal(engine.player.snapshot().status, "playing");
   assert.equal(audio.paused, false);
+  assert.equal(repository.sessions.get("session-a").audioKeys[0], [...repository.audio.keys()][0]);
+  assert.equal(repository.audio.size, 1);
+
+  await engine.handleCommand({ command: "stop" });
+  await waitFor(() => engine.inFlightAudio.size === 0, "stopped synthesis must finish before cache deletion");
+  await engine.handleCommand({ command: "clear-audio-cache" });
+  const saved = repository.sessions.get("session-a");
   assert.deepEqual(saved.audioKeys, []);
   assert.deepEqual(saved.chunkStates, ["pending"]);
   assert.equal(repository.audio.size, 0);
+});
+
+test("Kokoro model deletion is blocked while Kokoro is reading and disposes only Kokoro when idle", async () => {
+  const repository = new MemoryRepository();
+  const deleted = [];
+  const removedStorageKeys = [];
+  const audio = new MockAudio();
+  const inference = {
+    async initialize() { return { voices: ["af_heart"] }; },
+    async synthesize() { return makeWavBlob(); },
+    async deleteKokoroModel() { deleted.push("kokoro"); },
+    async dispose() {}
+  };
+  const engine = new PersistentReaderEngine({ audio, repository, inference, storage: { async remove(key) { removedStorageKeys.push(key); } } });
+  await engine.handleCommand({ command: "start", session: { ...session(), chunks: ["First."], sourceText: "First." } });
+  await waitFor(() => repository.audio.size === 1);
+
+  await assert.rejects(engine.handleCommand({ command: "delete-model" }), /STORAGE_OPERATION_BUSY/);
+  assert.deepEqual(deleted, []);
+  assert.equal(engine.player.snapshot().status, "playing");
+
+  await engine.handleCommand({ command: "stop" });
+  const result = await engine.handleCommand({ command: "delete-model" });
+  assert.equal(result.provider, "kokoro");
+  assert.deepEqual(deleted, ["kokoro"]);
+  assert.deepEqual(removedStorageKeys, ["modelCached"]);
+  assert.equal(repository.audio.size, 1, "deleting Kokoro must not clear saved WAVs");
+});
+
+test("deleting one Piper model is blocked while its voice is active", async () => {
+  const repository = new MemoryRepository();
+  const voice = PIPER_VOICE_CATALOG[0];
+  const deleted = [];
+  const audio = new MockAudio();
+  const inference = {
+    async initialize() { return { provider: "piper", voiceId: voice.id }; },
+    async synthesize() { return makeWavBlob(22050); },
+    async deletePiperModel(voiceId) { deleted.push(voiceId); return { voiceId, installed: false }; },
+    async dispose() {}
+  };
+  const engine = new PersistentReaderEngine({ audio, repository, inference });
+  const piperSession = { ...session(), voice: voice.id, voiceId: voice.id, voiceProvider: "piper", chunks: ["Hola."], sourceText: "Hola." };
+  await engine.handleCommand({ command: "start", session: piperSession });
+  await waitFor(() => repository.audio.size === 1);
+
+  await assert.rejects(engine.handleCommand({ command: "delete-piper-model", voiceId: voice.id }), /STORAGE_OPERATION_BUSY/);
+  assert.deepEqual(deleted, []);
+  assert.equal(engine.player.snapshot().status, "playing");
+
+  await engine.handleCommand({ command: "stop" });
+  await engine.handleCommand({ command: "delete-piper-model", voiceId: voice.id });
+  assert.deepEqual(deleted, [voice.id]);
+  assert.equal(repository.audio.size, 1, "deleting Piper must not clear saved WAVs");
+});
+
+test("provider model deletion is blocked during model initialization and can be retried after it completes", async () => {
+  const repository = new MemoryRepository();
+  const deleted = [];
+  let finishInitialization;
+  const inference = {
+    initialize() { return new Promise((resolve) => { finishInitialization = resolve; }); },
+    async synthesize() { return makeWavBlob(); },
+    async deleteKokoroModel() { deleted.push("kokoro"); },
+    async dispose() {}
+  };
+  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference, storage: { async remove() {} } });
+  const initializing = engine.handleCommand({ command: "initialize", voice: "af_heart" });
+  await waitFor(() => engine.providerOperations.get("kokoro")?.get("af_heart") === 1);
+
+  await assert.rejects(engine.handleCommand({ command: "delete-model" }), /STORAGE_OPERATION_BUSY/);
+  assert.deepEqual(deleted, []);
+  finishInitialization({ voices: ["af_heart"] });
+  await initializing;
+  await engine.handleCommand({ command: "delete-model" });
+  assert.deepEqual(deleted, ["kokoro"]);
+});
+
+test("Kokoro cleanup storage errors keep the command retryable and release the provider lock", async () => {
+  const repository = new MemoryRepository();
+  const deleted = [];
+  let storageFailures = 1;
+  const engine = new PersistentReaderEngine({
+    audio: new MockAudio(),
+    repository,
+    inference: {
+      async deleteKokoroModel() { deleted.push("kokoro"); },
+      async initialize() {}, async synthesize() {}, async dispose() {}
+    },
+    storage: {
+      async remove() {
+        if (storageFailures-- > 0) throw new Error("Storage unavailable");
+      }
+    }
+  });
+
+  await assert.rejects(engine.handleCommand({ command: "delete-model" }), /Storage unavailable/);
+  assert.equal(engine.providerMaintenance.has("kokoro"), false);
+  await engine.handleCommand({ command: "delete-model" });
+  assert.deepEqual(deleted, ["kokoro", "kokoro"]);
+});
+
+test("failed audio-cache transactions preserve the stored WAVs and session references", async () => {
+  const repository = new MemoryRepository();
+  await repository.saveAudioChunk({ id: "saved-wav", blob: makeWavBlob() });
+  const saved = { ...session(), audioKeys: ["saved-wav", null], chunkStates: ["ready", "pending"] };
+  await repository.saveSession(saved);
+  repository.clearAudioCache = async () => { throw new Error("IndexedDB transaction failed"); };
+  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference: { async initialize() {}, async synthesize() {}, async dispose() {} } });
+  engine.activeSession = saved;
+
+  await assert.rejects(engine.handleCommand({ command: "clear-audio-cache" }), /IndexedDB transaction failed/);
+  assert.equal(engine.audioCacheMaintenance, false);
+  assert.ok(await repository.getAudioChunk("saved-wav"));
+  assert.deepEqual((await repository.sessions.get("session-a")).audioKeys, ["saved-wav", null]);
+  assert.deepEqual(engine.activeSession.audioKeys, ["saved-wav", null]);
 });
 
 test("Piper generates and caches local WAVs by pinned voice/model and switching voice clears stale keys", async () => {

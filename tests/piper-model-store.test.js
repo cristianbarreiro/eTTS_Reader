@@ -117,6 +117,35 @@ test("Piper binds fetch to the worker global scope during config and model downl
   assert.deepEqual(receivers, [globalThis, globalThis]);
 });
 
+test("removing one Piper voice preserves every other installed Piper model", async () => {
+  const root = new MemoryDirectoryHandle();
+  const otherVoice = {
+    ...voice,
+    id: "piper:es_AR-other-high",
+    providerVoiceId: "es_AR-other-high",
+    label: "Español · Otra voz",
+    modelPath: "es/test/voice/other.onnx"
+  };
+  const store = new PiperModelStore({
+    storage: { async getDirectory() { return root; } },
+    catalog: [voice, otherVoice],
+    fetchImpl: async (url) => url.endsWith(".onnx.json")
+      ? new Response(JSON.stringify(config), { status: 200 })
+      : responseWithBytes(bytes)
+  });
+
+  await store.install(voice.id);
+  await store.install(otherVoice.id);
+  const removed = await store.remove(voice.id);
+  const otherStatus = await store.status(otherVoice.id);
+  assert.equal(removed.installed, false);
+  assert.equal((await store.status(voice.id)).installed, false);
+  assert.equal(otherStatus.installed, true);
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY);
+  const manifest = JSON.parse(await (await directory.getFileHandle(PIPER_MANIFEST_FILE)).getFile().then((file) => file.text()));
+  assert.deepEqual(Object.keys(manifest.models), [otherVoice.id]);
+});
+
 test("Piper accepts a pinned DaveFX v1 config without optional language metadata", async () => {
   const root = new MemoryDirectoryHandle();
   const daveFx = {

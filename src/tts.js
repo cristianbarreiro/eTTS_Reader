@@ -11,6 +11,7 @@ export class TTSProvider {
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const VOICES = ["af_heart", "am_michael"];
 const CACHE_KEY = "edge-local-reader-kokoro-v1";
+const VOICE_CACHE_KEY = "kokoro-voices";
 
 // El runtime y los embeddings están empaquetados. Solo se descargan bajo demanda los pesos del modelo.
 export class LocalKokoroProvider extends TTSProvider {
@@ -33,7 +34,7 @@ export class LocalKokoroProvider extends TTSProvider {
     }
 
     // Retry missing packaged voice resources without discarding the successfully loaded model or model cache.
-    const cache = await caches.open("kokoro-voices");
+    const cache = await caches.open(VOICE_CACHE_KEY);
     for (const voice of VOICES) {
       const remoteUrl = `https://huggingface.co/${MODEL_ID}/resolve/main/voices/${voice}.bin`;
       if (await cache.match(remoteUrl)) continue;
@@ -57,4 +58,11 @@ export class LocalKokoroProvider extends TTSProvider {
   }
 
   async dispose() { this.model = null; }
+
+  async deleteModel() {
+    await this.dispose();
+    if (typeof globalThis.caches?.delete !== "function") throw new Error("Este contexto no permite eliminar los recursos locales de Kokoro.");
+    await Promise.all([globalThis.caches.delete(CACHE_KEY), globalThis.caches.delete(VOICE_CACHE_KEY)]);
+    return { provider: "kokoro", deleted: true };
+  }
 }
