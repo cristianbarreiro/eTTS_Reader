@@ -1,46 +1,54 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TTSProviderRouter } from "../src/tts-router.js";
-import { makeSystemVoiceId } from "../src/voice-catalog.js";
 
-test("router initializes and synthesizes with only the selected provider", async () => {
-  const voice = { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina" };
-  const systemId = makeSystemVoiceId(voice);
+test("router initializes and synthesizes through only the selected local provider", async () => {
   const calls = [];
   const kokoro = {
-    async initialize() { calls.push("kokoro:init"); return { voices: ["af_heart"] }; },
-    async synthesize(text, voiceId) { calls.push(`kokoro:${voiceId}:${text}`); return new Blob(["wav"]); },
-    async dispose() { calls.push("kokoro:dispose"); }
+    async initialize(progress) { calls.push(["kokoro:init", typeof progress]); return { voices: ["af_heart"] }; },
+    async synthesize(text, voice) { calls.push(["kokoro:synthesize", text, voice]); return new Blob(["kokoro wav"]); },
+    async dispose() { calls.push(["kokoro:dispose"]); }
   };
-  const systemSpeech = {
-    async listVoices() { return [{ id: systemId }]; },
-    async synthesize(text, voiceId) { calls.push(`system:${voiceId}:${text}`); return { kind: "system-speech", voiceId, text }; },
-    cancel() { calls.push("system:cancel"); }
+  const piper = {
+    async initialize(voice, progress) { calls.push(["piper:init", voice, typeof progress]); return { voiceId: voice, ready: true }; },
+    async synthesize(text, voice, progress) { calls.push(["piper:synthesize", text, voice, typeof progress]); return new Blob(["piper wav"]); },
+    async modelStatus(voiceId) { return { voiceId, installed: true }; },
+    async installModel(voiceId) { return { voiceId, installed: true }; },
+    async removeModel(voiceId) { return { voiceId, installed: false }; },
+    catalog() { return [{ id: "piper:es_AR-daniela-high" }]; },
+    async listInstalled() { return [{ voiceId: "piper:es_AR-daniela-high", installed: true }]; },
+    async dispose() { calls.push(["piper:dispose"]); }
   };
-  const router = new TTSProviderRouter({ kokoro, systemSpeech });
+  const router = new TTSProviderRouter({ kokoro, piper });
 
-  assert.equal((await router.initialize(() => {}, systemId)).provider, "speechSynthesis");
-  assert.deepEqual(calls, []);
-  const spanish = await router.synthesize("Hola.", systemId);
-  assert.equal(spanish.kind, "system-speech");
-  assert.equal((await router.initialize()).provider, "kokoro");
-  const english = await router.synthesize("Hello.", "af_heart");
-  assert.ok(english instanceof Blob);
-  assert.deepEqual(calls, [
-    `system:${systemId}:Hola.`,
-    "kokoro:init",
-    "kokoro:af_heart:Hello."
+  assert.equal((await router.initialize(() => {}, "piper:es_AR-daniela-high")).provider, "piper");
+  assert.equal((await router.synthesize("Hola.", "piper:es_AR-daniela-high")) instanceof Blob, true);
+  assert.equal((await router.initialize(() => {}, "af_heart")).provider, "kokoro");
+  assert.equal((await router.synthesize("Hello.", "af_heart")) instanceof Blob, true);
+  assert.deepEqual(await router.piperModelStatus("piper:es_AR-daniela-high"), { voiceId: "piper:es_AR-daniela-high", installed: true });
+  assert.deepEqual(await router.installPiperModel("piper:es_AR-daniela-high"), { voiceId: "piper:es_AR-daniela-high", installed: true });
+  assert.deepEqual(await router.deletePiperModel("piper:es_AR-daniela-high"), { voiceId: "piper:es_AR-daniela-high", installed: false });
+  assert.deepEqual(router.piperCatalog(), [{ id: "piper:es_AR-daniela-high" }]);
+  assert.deepEqual(await router.listInstalledPiperModels(), [{ voiceId: "piper:es_AR-daniela-high", installed: true }]);
+  await router.dispose();
+
+  assert.deepEqual(calls.slice(0, 4), [
+    ["piper:init", "piper:es_AR-daniela-high", "function"],
+    ["piper:synthesize", "Hola.", "piper:es_AR-daniela-high", "undefined"],
+    ["kokoro:init", "function"],
+    ["kokoro:synthesize", "Hello.", "af_heart"]
   ]);
+  assert.ok(calls.some(([name]) => name === "kokoro:dispose"));
+  assert.ok(calls.some(([name]) => name === "piper:dispose"));
 });
 
-test("router rejects a system voice that disappeared and disposes providers", async () => {
+test("router rejects unknown and cross-provider voice IDs without silently falling back", async () => {
   const calls = [];
   const router = new TTSProviderRouter({
-    kokoro: { async initialize() { calls.push("kokoro:init"); }, async synthesize() {}, async dispose() { calls.push("kokoro:dispose"); } },
-    systemSpeech: { async listVoices() { return []; }, async synthesize() {}, cancel() { calls.push("system:cancel"); } }
+    kokoro: { async initialize() { calls.push("kokoro"); }, async synthesize() {}, async dispose() {} },
+    piper: { async initialize() { calls.push("piper"); }, async synthesize() {}, async dispose() {} }
   });
-  const missingId = makeSystemVoiceId({ name: "Missing", lang: "es-ES", voiceURI: "urn:voice:missing" });
-  await assert.rejects(router.initialize(() => {}, missingId), /ya no está disponible/);
-  await router.dispose();
-  assert.deepEqual(calls, ["system:cancel", "kokoro:dispose"]);
+  await assert.rejects(router.initialize(() => {}, "system:old-edge-voice"), /desconocido/);
+  await assert.rejects(router.synthesize("Hola", "not-a-voice"), /desconocido/);
+  assert.deepEqual(calls, []);
 });

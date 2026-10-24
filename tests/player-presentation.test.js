@@ -19,11 +19,11 @@ test("player heading exposes only meaningful playback states", () => {
   assert.equal(playerHeaderState("error"), "Error");
 });
 
-test("document progress captions distinguish temporal, chunk-based, and system speech progress", () => {
+test("document progress captions distinguish measured duration and pending fragments for local providers", () => {
   const base = { chunks: ["One", "Two"], activeKind: "chunk", totalProgress: 0.5 };
   assert.equal(readingProgressCaption({ ...base, totalDuration: null }), "Aprox. 50% por fragmentos");
   assert.equal(readingProgressCaption({ ...base, totalDuration: 20 }), "Tiempo total · 50%");
-  assert.equal(readingProgressCaption({ ...base, activeProvider: "speechSynthesis" }), "Aprox. 50% por texto");
+  assert.equal(readingProgressCaption({ ...base, activeProvider: "piper", totalDuration: 20 }), "Tiempo total · 50%");
   assert.equal(readingProgressCaption({ ...base, activeKind: "preview" }), "Muestra independiente");
   assert.equal(readingProgressCaption({ ...base, chunks: [] }), "Sin progreso");
 });
@@ -32,7 +32,7 @@ test("duration summary never presents zero as a measured duration before audio m
   const queued = { chunks: ["Hello."], durations: [null], totalDuration: null, knownDurationCount: 0, activeKind: "chunk" };
   assert.equal(readingDurationSummary(queued, "kokoro"), "Duración conocida — · total pendiente (0/1 fragmentos medidos)");
   assert.equal(readingDurationSummary({ ...queued, durations: [2.4], knownDurationCount: 1 }, "kokoro"), "Duración conocida 0:02 · total pendiente (1/1 fragmentos medidos)");
-  assert.equal(readingDurationSummary(queued, "speechSynthesis"), "La duración y la búsqueda temporal no están disponibles para voces del sistema.");
+  assert.equal(readingDurationSummary(queued, "piper"), "Duración conocida — · total pendiente (0/1 fragmentos medidos)");
 });
 
 test("voice provider pill retains Kokoro identity while showing model availability", () => {
@@ -40,6 +40,13 @@ test("voice provider pill retains Kokoro identity while showing model availabili
   assert.equal(kokoroEngineLabel("loading"), "Cargando Kokoro");
   assert.equal(kokoroEngineLabel("ready"), "Kokoro listo");
   assert.equal(kokoroEngineLabel("error"), "Error de Kokoro");
+});
+
+test("the Spanish voice selector uses local Piper profiles and removes the Edge system-voice control", () => {
+  assert.match(sidepanel, /Piper · español local/);
+  assert.match(sidepanel, /piper:es_AR-daniela-high/);
+  assert.match(sidepanel, /piper:es_ES-davefx-medium/);
+  assert.doesNotMatch(sidepanel, /refresh-system-voices|voces de Edge\/Windows/);
 });
 
 test("player and voice sections have concise titles, and fragment times follow the seek bar", () => {

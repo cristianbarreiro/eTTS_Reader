@@ -65,6 +65,36 @@ test("loading a queue sends replace without sending a play command", async () =>
   client.dispose();
 });
 
+test("paused preview playback resumes without creating or replacing a reading session", async () => {
+  const runtime = fakeRuntime(async ({ command }) => command === "preview" ? {
+    ok: true,
+    snapshot: { chunks: ["Hola."], status: "paused", selectedIndex: 0, speed: 1, durations: [1], activeKind: "preview", activeVoiceId: "piper:es_AR-daniela-high" }
+  } : { ok: true });
+  const client = new ReaderClient({ runtime });
+
+  await client.preview("piper:es_AR-daniela-high");
+  await client.play();
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["preview", "resume"]);
+  assert.equal(client.session, null);
+  assert.equal(client.snapshot().activeKind, "preview");
+  client.dispose();
+});
+
+test("completed preview can be tested again with the same Piper voice and no session", async () => {
+  const runtime = fakeRuntime(async ({ command }) => command === "preview" ? {
+    ok: true,
+    snapshot: { chunks: ["Hola."], status: "completed", selectedIndex: 0, speed: 1, durations: [1], activeKind: "preview", activeVoiceId: "piper:es_ES-davefx-medium" }
+  } : { ok: true });
+  const client = new ReaderClient({ runtime });
+
+  await client.preview("piper:es_ES-davefx-medium");
+  await client.play();
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["preview", "preview"]);
+  assert.equal(runtime.messages[1].payload.voice, "piper:es_ES-davefx-medium");
+  assert.equal(client.session, null);
+  client.dispose();
+});
+
 test("Kokoro worker is not created on panel startup and can be disposed after explicit preparation", async () => {
   let created = 0;
   let terminated = 0;

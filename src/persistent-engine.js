@@ -1,14 +1,13 @@
 import { PlaybackController } from "./player-controller.js";
 import { makeAudioCacheKey } from "./persistence.js";
 import { validateWavBlob } from "./audio-utils.js";
-import { isSystemVoiceId, KOKORO_MODEL_ID, voiceSessionFields } from "./voice-catalog.js";
+import { getVoiceProvider, getVoiceRecord, KOKORO_RUNTIME_VERSION, PIPER_PROVIDER_VERSION, voiceSessionFields } from "./voice-catalog.js";
 
 export class PersistentReaderEngine {
-  constructor({ audio, repository, inference, speech = null, publish = () => {}, now = () => Date.now(), progressWriteInterval = 1000 }) {
+  constructor({ audio, repository, inference, publish = () => {}, now = () => Date.now(), progressWriteInterval = 1000 }) {
     if (!audio || !repository || !inference) throw new TypeError("El motor persistente necesita audio, almacenamiento e inferencia.");
     this.repository = repository;
     this.inference = inference;
-    this.speech = speech;
     this.publishMessage = publish;
     this.now = now;
     this.progressWriteInterval = progressWriteInterval;
@@ -23,7 +22,6 @@ export class PersistentReaderEngine {
     this.previewAudioKey = null;
     this.player = new PlaybackController({
       audio,
-      speech,
       synthesize: (text, { voice }) => this._queueAudio(text, voice, this.player.snapshot().selectedIndex),
       getVoice: () => this.activeSession?.voice || "af_heart",
       onState: (snapshot) => this._publishState(snapshot)
@@ -78,13 +76,11 @@ export class PersistentReaderEngine {
       if (!this.recordedDurations.has(marker)) {
         this.recordedDurations.add(marker);
         void this.repository.getAudioChunk(activeAudioKey).then((record) => record && this.repository.saveAudioChunk({
-          ...record, format: "wav", sampleRate: 24000, duration
+          ...record, format: "wav", duration
         })).catch(() => {});
       }
     }
-    const currentAudioKey = snapshot.activeKind === "preview"
-      ? this.previewAudioKey
-      : snapshot.activeProvider === "speechSynthesis" ? null : activeAudioKey || null;
+    const currentAudioKey = snapshot.activeKind === "preview" ? this.previewAudioKey : activeAudioKey || null;
     this._publish("reader:state", {
       sessionId: this.activeSession?.id || null,
       snapshot: { ...snapshot, chunkStates: [...(this.activeSession?.chunkStates || [])], downloadUrl: null },
@@ -100,8 +96,14 @@ export class PersistentReaderEngine {
 
   async _queueAudio(text, voice, index) {
     const generation = this.sessionGeneration;
-    const systemVoice = isSystemVoiceId(voice);
-    const id = systemVoice ? `system:${voice}:${text}` : await makeAudioCacheKey(text, voice, KOKORO_MODEL_ID, "kokoro");
+    const voiceRecord = getVoiceRecord(voice);
+    const provider = voiceRecord.provider;
+    const modelId = voiceRecord.modelId;
+    const providerVersion = provider === "kokoro"
+      ? KOKORO_RUNTIME_VERSION
+      : `${PIPER_PROVIDER_VERSION};${voiceRecord.modelRevision}`;
+    const sampleRate = voiceRecord.sampleRate || 24000;
+    const id = await makeAudioCacheKey(text, voice, modelId, provider, providerVersion);
     if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
     const existing = this.inFlightAudio.get(id);
     if (existing?.generation === generation) return existing.task;
@@ -109,7 +111,6 @@ export class PersistentReaderEngine {
     if (isSessionChunk) {
       const chunkStates = [...(this.activeSession.chunkStates || this.activeSession.chunks.map(() => "pending"))];
       const audioKeys = [...(this.activeSession.audioKeys || [])];
-      if (systemVoice) audioKeys[index] = null;
       chunkStates[index] = "generating";
       this.activeSession = { ...this.activeSession, audioKeys, chunkStates, lastError: "" };
       this.saveTail = this.saveTail.then(() => this.repository.saveSession(this.activeSession)).catch((error) => {
@@ -118,22 +119,21 @@ export class PersistentReaderEngine {
     }
     const task = this.synthesisTail.then(async () => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
-      if (systemVoice) {
-        const result = await this.inference.synthesize(text, voice);
-        if (result?.kind !== "system-speech") throw new Error("El proveedor del sistema no preparó la voz seleccionada.");
-        return result;
-      }
       const cached = await this.repository.getAudioChunk(id);
       if (cached?.blob instanceof Blob && cached.blob.size > 0) return cached.blob;
-      this._publish("reader:model", { state: "loading", message: "Preparando Kokoro local en segundo plano." });
+      this._publish("reader:model", {
+        provider,
+        voiceId: voice,
+        state: "loading",
+        message: provider === "piper" ? `Preparando Piper local para ${voiceRecord.label}.` : "Preparando Kokoro local en segundo plano."
+      });
       const blob = await this.inference.synthesize(text, voice);
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
       await validateWavBlob(blob);
-      await this.repository.saveAudioChunk({ id, blob, voice, provider: "kokoro", modelId: KOKORO_MODEL_ID, providerVersion: "kokoro-js@1.2.1", text, format: "wav", sampleRate: 24000, duration: null });
+      await this.repository.saveAudioChunk({ id, blob, voice, provider, modelId, modelRevision: voiceRecord.modelRevision || null, providerVersion, text, format: "wav", sampleRate, duration: null });
       return blob;
     }).then(async (blob) => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la preparación del audio.");
-      if (blob?.kind === "system-speech") return blob;
       if (this.player.snapshot().activeKind === "preview") this.previewAudioKey = id;
       if (this.activeSession?.voice === voice && this.activeSession.chunks[index] === text && this.player.snapshot().activeKind !== "preview") {
         const audioKeys = [...(this.activeSession.audioKeys || [])];
@@ -143,7 +143,12 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, audioKeys, chunkStates, lastError: "" };
         await this.repository.saveSession(this.activeSession);
       }
-      if (!systemVoice) this._publish("reader:model", { state: "ready", message: "Kokoro local listo." });
+      this._publish("reader:model", {
+        provider,
+        voiceId: voice,
+        state: "ready",
+        message: provider === "piper" ? `Piper local listo · ${voiceRecord.label}.` : "Kokoro local listo."
+      });
       return blob;
     }).catch((error) => {
       if (generation === this.sessionGeneration && isSessionChunk && this.activeSession?.chunks[index] === text) {
@@ -152,7 +157,12 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, chunkStates, lastError: error.message || "No se pudo generar este fragmento." };
         this.saveTail = this.saveTail.then(() => this.repository.saveSession(this.activeSession)).catch(() => {});
       }
-      if (generation === this.sessionGeneration && !systemVoice) this._publish("reader:model", { state: "error", message: error.message || "No se pudo preparar Kokoro." });
+      if (generation === this.sessionGeneration) this._publish("reader:model", {
+        provider,
+        voiceId: voice,
+        state: "error",
+        message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`
+      });
       throw error;
     }).finally(() => { if (this.inFlightAudio.get(id)?.task === task) this.inFlightAudio.delete(id); });
     this.inFlightAudio.set(id, { generation, task });
@@ -188,7 +198,7 @@ export class PersistentReaderEngine {
       snapshot: this.activeSession
         ? { ...snapshot, chunkStates: [...(this.activeSession.chunkStates || [])], downloadUrl: null }
         : snapshot.activeKind === "preview" ? { ...snapshot, downloadUrl: null } : null,
-      currentAudioKey: snapshot.activeKind === "preview" ? this.previewAudioKey : snapshot.activeProvider === "speechSynthesis" ? null : this.activeSession?.audioKeys?.[snapshot.selectedIndex] || null
+      currentAudioKey: snapshot.activeKind === "preview" ? this.previewAudioKey : this.activeSession?.audioKeys?.[snapshot.selectedIndex] || null
     };
   }
 
@@ -214,13 +224,41 @@ export class PersistentReaderEngine {
       }
       case "initialize": {
         const voice = message.voice || this.activeSession?.voice || "af_heart";
-        if (isSystemVoiceId(voice)) {
-          const result = await this.inference.initialize(() => {}, voice);
-          return { ok: true, result };
-        }
-        this._publish("reader:model", { state: "loading", message: "Cargando recursos locales de Kokoro." });
-        const result = await this.inference.initialize((event) => this._publish("reader:model-progress", { event }), voice);
+        const provider = getVoiceProvider(voice);
+        this._publish("reader:model", {
+          provider, voiceId: voice, state: "loading",
+          message: provider === "piper" ? "Iniciando el motor Piper local." : "Cargando recursos locales de Kokoro."
+        });
+        const result = await this.inference.initialize((event) => this._publish("reader:model-progress", { provider, voiceId: voice, event }), voice);
+        this._publish("reader:model", {
+          provider, voiceId: voice, state: "ready",
+          message: provider === "piper" ? `Piper local listo · ${getVoiceRecord(voice).label}.` : "Modelo Kokoro local listo."
+        });
         return { ok: true, result };
+      }
+      case "piper-catalog": return { ok: true, voices: this.inference.piperCatalog() };
+      case "piper-model-status": return { ok: true, ...(await this.inference.piperModelStatus(message.voiceId)) };
+      case "list-installed-piper-models": return { ok: true, voices: await this.inference.listInstalledPiperModels() };
+      case "install-piper-model": {
+        const voiceId = message.voiceId;
+        const voice = getVoiceRecord(voiceId);
+        if (voice.provider !== "piper") throw new TypeError("Solo se pueden instalar voces Piper con esta acción.");
+        this._publish("reader:model", { provider: "piper", voiceId, state: "loading", phase: "download", message: `Descargando ${voice.label} desde el repositorio oficial.` });
+        try {
+          const result = await this.inference.installPiperModel(voiceId, (event) => this._publish("reader:model-progress", { provider: "piper", voiceId, event }));
+          this._publish("reader:model", { provider: "piper", voiceId, state: "cached", phase: "download", message: `Modelo Piper instalado y verificado · ${voice.label}.` });
+          return { ok: true, ...result };
+        } catch (error) {
+          this._publish("reader:model", { provider: "piper", voiceId, state: "error", phase: "download", message: error.message || "No se pudo instalar el modelo Piper." });
+          throw error;
+        }
+      }
+      case "delete-piper-model": {
+        const voice = getVoiceRecord(message.voiceId);
+        if (voice.provider !== "piper") throw new TypeError("Solo se puede eliminar un modelo Piper con esta acción.");
+        const result = await this.inference.deletePiperModel(message.voiceId);
+        this._publish("reader:model", { provider: "piper", voiceId: message.voiceId, state: "idle", phase: "download", message: "Modelo Piper eliminado de este dispositivo." });
+        return { ok: true, ...result };
       }
       case "start": {
         const session = message.session;
@@ -300,15 +338,13 @@ export class PersistentReaderEngine {
         if (this.activeSession) this.activeSession = { ...this.activeSession, speed: Number(message.value) };
         break;
       case "voice": {
-        const isKokoro = ["af_heart", "am_michael"].includes(message.value);
-        const isAvailableSystemVoice = isSystemVoiceId(message.value)
-          && (await this.inference.listSystemVoices()).some((voice) => voice.id === message.value);
-        if (!isKokoro && !isAvailableSystemVoice) throw new Error("El perfil vocal seleccionado no está disponible.");
+        getVoiceRecord(message.value);
         if (!this.activeSession) break;
         const playback = this.player.snapshot();
-        const keepCurrentAudio = playback.activeProvider === "kokoro"
+        const keepCurrentAudio = playback.activeProvider === getVoiceProvider(message.value)
           && playback.activeKind === "chunk"
-          && playback.activeVoiceId === this.activeSession.voice;
+          && playback.activeVoiceId === this.activeSession.voice
+          && this.activeSession.voice === message.value;
         const currentIndex = playback.selectedIndex;
         this.activeSession = {
           ...this.activeSession,
@@ -338,8 +374,8 @@ export class PersistentReaderEngine {
       case "preview":
         if (!message.voice) throw new Error("Selecciona un perfil vocal compatible.");
         this.previewAudioKey = null;
-        await this.player.preview(isSystemVoiceId(message.voice)
-          ? "Hola. Esta es una muestra de la voz del sistema."
+        await this.player.preview(getVoiceProvider(message.voice) === "piper"
+          ? "Hola. Esta es una muestra de voz Piper en español, generada de forma local."
           : "Hello. This is a local voice sample.", { voice: message.voice });
         break;
       case "close-idle":

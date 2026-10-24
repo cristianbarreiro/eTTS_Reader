@@ -1,13 +1,12 @@
 import "./style.css";
 import { splitText } from "./text.js";
 import { formatTime } from "./audio-utils.js";
-import { attemptInitialization, deriveReaderControls } from "./reader-state.js";
+import { attemptInitialization, deriveReaderControls, prepareAndRunVoiceTest } from "./reader-state.js";
 import { makeId, ReaderRepository } from "./persistence.js";
 import { persistEditorSnapshot } from "./editor-persistence.js";
 import { buildLibraryEntries, libraryActionFor, openLibraryEntry, resumeLibrarySession } from "./library.js";
 import { ReaderClient } from "./reader-client.js";
-import { getVoiceProvider, isSystemVoiceId, voiceSessionFields } from "./voice-catalog.js";
-import { SystemSpeechProvider } from "./system-speech.js";
+import { getVoiceProvider, getVoiceRecord, isLegacySystemVoiceId, PIPER_DEFAULT_VOICE_ID, PIPER_VOICE_CATALOG, voiceSessionFields } from "./voice-catalog.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
 import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "./player-presentation.js";
@@ -28,13 +27,13 @@ const ui = {
   followActiveTab: $("#follow-active-tab"), activeTabTitle: $("#active-tab-title"), activeTabStatus: $("#active-tab-status"),
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
   replaceImport: $("#replace-with-import"), appendImport: $("#append-import"), cancelImport: $("#cancel-import"),
-  voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"), refreshVoices: $("#refresh-system-voices"), voiceNote: $("#voice-note"), privacyNote: $("#privacy-note"),
+  voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"), voiceNote: $("#voice-note"), privacyNote: $("#privacy-note"),
   engineState: $("#engine-state"), modelStatus: $("#model-status"), downloadProgress: $("#download-progress"),
   play: $("#play"), pause: $("#pause"), stop: $("#stop"), previous: $("#previous"), next: $("#next"),
   position: $("#position"), playerState: $("#player-state"), playbackStatus: $("#playback-status"),
   progress: $("#read-progress"), progressFill: $("#read-progress-fill"), progressCaption: $("#progress-caption"),
   elapsed: $("#elapsed"), duration: $("#duration"), durationSummary: $("#duration-summary"), seek: $("#seek"),
-  downloadAudio: $("#download-audio"), clearText: $("#clear-text"), deleteAudioCache: $("#delete-audio-cache"), deleteModel: $("#delete-model"),
+  downloadAudio: $("#download-audio"), clearText: $("#clear-text"), deleteAudioCache: $("#delete-audio-cache"), deleteModel: $("#delete-model"), deletePiperModel: $("#delete-piper-model"),
   storageUsage: $("#storage-usage")
 };
 
@@ -42,6 +41,8 @@ const repository = new ReaderRepository();
 const presentTabFavicon = createTabFaviconPresenter(ui.activeTabFavicon, ui.activeTabFaviconFallback);
 let modelState = "idle";
 let initializationPromise = null;
+const piperStates = new Map(PIPER_VOICE_CATALOG.map((voice) => [voice.id, { state: "checking", installed: false, modelSizeBytes: voice.modelSizeBytes }]));
+const piperInstallPromises = new Map();
 let currentDocument = null;
 let currentSession = null;
 let savedDocuments = [];
@@ -65,8 +66,6 @@ let fileSelectionPurpose = "document";
 let queueLoadBusy = false;
 let staleQueueStopPending = false;
 let staleQueueStopPromise = null;
-let systemVoices = [];
-const systemVoiceCatalog = new SystemSpeechProvider();
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const panelStatus = createPanelStatusState();
 
@@ -120,9 +119,7 @@ function updateQueueSyncUI(override = "") {
     message = "Preparando la cola de reproducción…";
     state = "loading";
   } else if (!override && matches) {
-    message = getVoiceProvider(queue.voice || queue.voiceId) === "speechSynthesis"
-      ? "Cola cargada · SpeechSynthesis se iniciará al reproducir."
-      : "Cola cargada · el primer audio se generará al reproducir.";
+    message = "Cola cargada · el primer audio local se generará al reproducir.";
     state = "current";
   } else if (!override && queue?.id) {
     message = "El reproductor conserva una cola anterior. Carga el texto actual antes de reproducir.";
@@ -139,76 +136,62 @@ function updateQueueSyncUI(override = "") {
   ui.loadPlayer.disabled = !hasText || libraryMutationBusy || queueLoadBusy;
 }
 
-function controlsModelState() { return modelState; }
+function controlsModelState(voiceId = ui.voice.value) {
+  return getVoiceProvider(voiceId) === "piper" ? piperStates.get(voiceId)?.state || "checking" : modelState;
+}
 function currentQueueMatchesEditor() {
   return playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value });
 }
 
 function readerControls(snapshot = player.snapshot()) {
-  const isCurrentSpeech = snapshot.activeProvider === "speechSynthesis" && ["starting", "playing", "paused", "audio-ready"].includes(snapshot.status);
   const voiceId = ui.voice.value;
   const provider = getVoiceProvider(voiceId);
   const queueMatches = snapshot.activeKind === "preview" || currentQueueMatchesEditor();
   const queueChunkCount = queueMatches ? snapshot.chunks.length : 0;
-  return deriveReaderControls(controlsModelState(), queueChunkCount, snapshot.status === "playing", {
+  return deriveReaderControls(controlsModelState(voiceId), queueChunkCount, snapshot.status === "playing", {
     provider,
-    systemVoiceAvailable: provider === "speechSynthesis" && (systemVoices.some((voice) => voice.id === voiceId)
-      || isCurrentSpeech && snapshot.activeVoiceId === voiceId),
-    audioAvailable: provider === "kokoro" && queueMatches && Boolean(snapshot.currentAudioKey || player.session?.audioKeys?.[snapshot.selectedIndex]),
-    allowLazyInitialization: provider === "kokoro" && queueMatches
+    audioAvailable: queueMatches && Boolean(snapshot.currentAudioKey || player.session?.audioKeys?.[snapshot.selectedIndex]),
+    allowLazyInitialization: provider === "kokoro" && queueMatches,
+    allowLazyVoiceTest: provider === "kokoro"
+      ? ["idle", "cached"].includes(controlsModelState(voiceId))
+      : provider === "piper" && piperStates.get(voiceId)?.installed === true
   });
 }
 
 function updateVoiceProviderUI() {
   const selected = ui.voice.value;
-  const systemVoice = systemVoices.find((voice) => voice.id === selected);
-  const isSystem = isSystemVoiceId(selected);
-  if (isSystem) {
-    const location = systemVoice?.localService === true ? "local" : systemVoice?.localService === false ? "en línea" : "sistema";
-    const statusLabels = {
-      registered: "registrada · pendiente de prueba",
-      "pending-test": "prueba en curso",
-      "tested-successfully": "probada en esta sesión",
-      "temporary-failure": "falló temporalmente · reintenta",
-      interrupted: "prueba interrumpida",
-      unavailable: "ya no disponible"
-    };
-    ui.engineState.textContent = systemVoice ? `${location} · ${statusLabels[systemVoice.status] || "registrada"}` : "Voz del sistema no disponible";
-    ui.engineState.dataset.state = systemVoice ? "system" : "error";
-    const sessionVoiceId = currentSession?.voice || currentSession?.voiceId;
-    const missingSessionVoice = isSystemVoiceId(sessionVoiceId) && !systemVoices.some((voice) => voice.id === sessionVoiceId);
-    const failureAction = systemVoice?.status === "temporary-failure"
-      ? "Pulsa Probar voz para reintentar, Actualizar voces para volver a consultar Edge o elige otra voz."
-      : "";
-    ui.voiceNote.textContent = missingSessionVoice
-      ? "La sesión guardada depende de una voz que Edge ya no anuncia. Su ID y la sesión se conservaron; elige otra voz para continuar."
-      : systemVoice
-        ? `${systemVoice.label} · ${location === "sistema" ? "tipo de conexión desconocido" : `servicio ${location}`} · ${statusLabels[systemVoice.status] || "registrada por Edge"}. La aparición en la lista no garantiza síntesis. ${failureAction} Usa Kokoro para voz local inglesa; SpeechSynthesis no exporta WAV.`
-        : "Esta voz guardada ya no aparece en Edge/Windows. Actualiza la lista o selecciona otra voz.";
-    ui.privacyNote.textContent = "Voz del sistema: el texto se entrega a Edge/Windows y podría procesarse mediante sus servicios. Usa Kokoro si necesitas síntesis local.";
-    ui.modelStatus.textContent = systemVoice
-      ? "Sin descarga de modelo. El modo sin conexión depende de la voz y la configuración del sistema; no se puede garantizar."
-      : "Voz del sistema no encontrada. No se seleccionará otra voz automáticamente.";
-    ui.install.textContent = "Kokoro · voces inglesas";
-    ui.install.disabled = true;
+  const record = getVoiceRecord(selected);
+  if (record.provider === "piper") {
+    const state = piperStates.get(selected) || { state: "checking", installed: false, modelSizeBytes: record.modelSizeBytes };
+    const labels = { checking: "Comprobando Piper", idle: "Piper sin descargar", cached: "Piper guardado", loading: "Preparando Piper", ready: "Piper listo", error: "Error de Piper" };
+    ui.engineState.textContent = labels[state.state] || "Piper local";
+    ui.engineState.dataset.state = state.state;
+    ui.voiceNote.textContent = `${record.label}. El modelo se descarga cuando lo solicitas; después, texto y síntesis permanecen en este dispositivo.`;
+    ui.privacyNote.textContent = "Piper procesa el texto localmente. La conexión solo se usa para descargar el modelo oficial cuando lo solicitas.";
+    ui.deleteModel.hidden = true;
+    if (ui.deletePiperModel) {
+      ui.deletePiperModel.hidden = !state.installed;
+      ui.deletePiperModel.disabled = state.state === "loading";
+    }
+    ui.install.disabled = ["checking", "loading", "ready"].includes(state.state);
+    if (state.state === "checking") ui.install.textContent = "Comprobando modelo local…";
+    else if (state.state === "loading") ui.install.textContent = state.phase === "download" ? "Descargando Piper…" : "Preparando Piper…";
+    else if (state.state === "ready") ui.install.textContent = "Voz preparada";
+    else if (state.installed) ui.install.textContent = state.state === "error" ? "Reintentar preparación" : "Preparar voz Piper";
+    else ui.install.textContent = state.state === "error" ? `Reintentar descarga · ${Math.round(record.modelSizeBytes / 1_000_000)} MB` : `Descargar voz · ${Math.round(record.modelSizeBytes / 1_000_000)} MB`;
     return;
   }
+  ui.deleteModel.hidden = false;
+  if (ui.deletePiperModel) ui.deletePiperModel.hidden = true;
   ui.engineState.textContent = kokoroEngineLabel(modelState);
   ui.engineState.dataset.state = modelState;
-  const sessionVoiceId = currentSession?.voice || currentSession?.voiceId;
-  const missingSessionVoice = isSystemVoiceId(sessionVoiceId) && !systemVoices.some((voice) => voice.id === sessionVoiceId);
-  ui.voiceNote.textContent = missingSessionVoice
-    ? "La sesión guardada depende de una voz que Edge ya no anuncia. Su ID y la sesión se conservaron; puedes seleccionar Kokoro para inglés o elegir otra voz del sistema."
-    : "Kokoro local genera audio WAV descargable para Heart y Michael. La primera preparación requiere descargar el modelo.";
-  ui.privacyNote.textContent = "Con Kokoro, el texto se sintetiza localmente; la red solo se usa para descargar los pesos solicitados.";
+  const migratedSession = Boolean(currentSession?.voiceMigrationVersion);
+  ui.voiceNote.textContent = migratedSession && isLegacySystemVoiceId(currentSession?.voiceMigration?.fromVoice)
+    ? "Esta sesión usaba una voz de Edge/Windows. Conservamos el texto y el progreso, y cambiamos su proveedor de forma segura; instala Piper para volver a generar audio."
+    : "Kokoro local genera WAV descargable para Heart y Michael. «Probar voz» prepara el modelo la primera vez y reproduce una muestra.";
+  ui.privacyNote.textContent = "Las voces locales sintetizan el texto en este dispositivo; solo se conecta a internet al descargar el modelo solicitado.";
   ui.install.disabled = ["loading", "ready"].includes(modelState);
-  ui.install.textContent = ({
-    idle: "Preparar Kokoro local",
-    cached: "Cargar modelo local",
-    loading: "Preparando Kokoro…",
-    ready: "Modelo preparado",
-    error: "Reintentar carga local"
-  })[modelState] || "Preparar Kokoro local";
+  ui.install.textContent = ({ idle: "Preparar Kokoro local", cached: "Cargar modelo local", loading: "Preparando Kokoro…", ready: "Modelo preparado", error: "Reintentar carga local" })[modelState] || "Preparar Kokoro local";
 }
 
 function modelLabel() {
@@ -222,17 +205,13 @@ function modelLabel() {
 }
 
 function describePlayer(snapshot) {
-  if (snapshot.status === "text-ready" && modelState === "loading" && snapshot.activeProvider !== "speechSynthesis") {
+  const activeProvider = snapshot.activeProvider || getVoiceProvider(ui.voice.value);
+  if (snapshot.status === "text-ready" && modelState === "loading" && activeProvider === "kokoro") {
     return "Preparando Kokoro local antes de generar el primer audio.";
   }
-  if (snapshot.status === "text-ready" && snapshot.chunks.length) return snapshot.activeProvider === "speechSynthesis"
-    ? "Cola preparada. La voz del sistema se iniciará al reproducir."
-    : "Cola preparada. El primer audio se generará al reproducir.";
+  if (snapshot.status === "text-ready" && snapshot.chunks.length) return "Cola preparada. El primer audio se generará al reproducir.";
   if (snapshot.status === "starting") return "Esperando la confirmación de inicio del proveedor de voz.";
   if (snapshot.status === "playing") {
-    if (snapshot.activeProvider === "speechSynthesis") return snapshot.activeKind === "preview"
-      ? "Muestra de Edge/Windows; no genera un WAV descargable."
-      : "Voz del sistema; no ofrece duración exacta ni un WAV descargable.";
     if (snapshot.activeKind === "preview") return "Muestra de voz local; la lectura del documento no cambia.";
     return "Audio WAV local del fragmento actual.";
   }
@@ -242,7 +221,6 @@ function describePlayer(snapshot) {
   if (snapshot.status === "audio-ready") return snapshot.activeKind === "preview"
     ? "La muestra local está lista para reproducirse."
     : "El audio del fragmento está listo para reproducirse o descargarse.";
-  if (snapshot.status === "paused" && snapshot.activeProvider === "speechSynthesis") return "La voz del sistema no ofrece una posición temporal exacta.";
   if (snapshot.status === "paused") return `Posición conservada en ${formatTime(snapshot.currentTime)}.`;
   if (snapshot.status === "interrupted") return snapshot.message || "La sesión se guardó. Pulsa Reanudar para continuar.";
   if (snapshot.status === "error") return userFacingErrorMessage(snapshot.message, "playback");
@@ -253,15 +231,6 @@ function describePlayer(snapshot) {
 }
 
 function renderPlayer(snapshot) {
-  if (snapshot.activeProvider === "speechSynthesis" && snapshot.activeVoiceId) {
-    const status = snapshot.status === "completed" ? "tested-successfully"
-      : snapshot.status === "error" ? "temporary-failure"
-        : ["starting", "playing", "paused"].includes(snapshot.status) ? "pending-test" : null;
-    if (status) {
-      systemVoiceCatalog.setVoiceStatus(snapshot.activeVoiceId, status);
-      systemVoices = systemVoices.map((voice) => voice.id === snapshot.activeVoiceId ? { ...voice, status } : voice);
-    }
-  }
   updateVoiceProviderUI();
   const chunkCount = snapshot.chunks.length;
   const hasText = chunkCount > 0;
@@ -270,7 +239,6 @@ function renderPlayer(snapshot) {
   const isPlaying = snapshot.status === "playing";
   const isGenerating = ["generating", "starting"].includes(snapshot.status);
   const activeProvider = snapshot.activeProvider || getVoiceProvider(ui.voice.value);
-  const usesSystemSpeech = activeProvider === "speechSynthesis";
 
   ui.position.textContent = `${selected} / ${chunkCount}`;
   ui.position.setAttribute("aria-label", `Fragmento ${selected} de ${chunkCount}`);
@@ -286,18 +254,16 @@ function renderPlayer(snapshot) {
   ui.progress.setAttribute("aria-valuetext", progressText);
   ui.progressCaption.textContent = progressText;
 
-  ui.elapsed.textContent = usesSystemSpeech ? "—" : formatTime(snapshot.currentTime);
-  ui.duration.textContent = usesSystemSpeech ? "—" : formatTime(snapshot.duration ?? Number.NaN);
+  ui.elapsed.textContent = formatTime(snapshot.currentTime);
+  ui.duration.textContent = formatTime(snapshot.duration ?? Number.NaN);
   ui.seek.min = "0";
-  ui.seek.max = String(usesSystemSpeech ? 0 : snapshot.duration || 0);
+  ui.seek.max = String(snapshot.duration || 0);
   ui.seek.step = "0.1";
-  ui.seek.value = String(usesSystemSpeech ? 0 : Math.min(snapshot.currentTime, snapshot.duration || 0));
+  ui.seek.value = String(Math.min(snapshot.currentTime, snapshot.duration || 0));
   const queueMatchesEditor = snapshot.activeKind === "preview" || currentQueueMatchesEditor();
-  ui.seek.disabled = !queueMatchesEditor || usesSystemSpeech || !Number.isFinite(snapshot.duration)
+  ui.seek.disabled = !queueMatchesEditor || !Number.isFinite(snapshot.duration)
     || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
-  ui.seek.setAttribute("aria-valuetext", usesSystemSpeech
-    ? "La voz del sistema no informa posición temporal para buscar."
-    : `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
+  ui.seek.setAttribute("aria-valuetext", `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
 
   ui.durationSummary.textContent = readingDurationSummary(snapshot, activeProvider);
 
@@ -311,7 +277,7 @@ function renderPlayer(snapshot) {
   ui.stop.disabled = !(hasText || snapshot.activeKind === "preview") || !["playing", "starting", "paused", "generating", "audio-ready", "completed", "interrupted", "error"].includes(snapshot.status);
   ui.previous.disabled = snapshot.activeKind === "preview" || !controls.canPlay || snapshot.selectedIndex <= 0;
   ui.next.disabled = snapshot.activeKind === "preview" || !controls.canPlay || snapshot.selectedIndex >= chunkCount - 1;
-  ui.test.disabled = !controls.canTestVoice || isPlaying || isGenerating;
+  ui.test.disabled = !controls.canRequestVoiceTest || isPlaying || isGenerating;
 
   const staleQueue = snapshot.activeKind !== "preview" && !currentQueueMatchesEditor();
   const message = staleQueue
@@ -349,14 +315,39 @@ async function refreshDownloadLink(audioKey) {
   }
 }
 
+function setPiperVoiceState(voiceId, patch) {
+  if (!piperStates.has(voiceId)) return;
+  piperStates.set(voiceId, { ...piperStates.get(voiceId), ...patch });
+}
+
 function handleModelMessage(message) {
   if (message.type === "reader:model-progress") {
     const event = message.event;
-    if (event?.status === "progress" && Number.isFinite(event.progress)) {
+    if (Number.isFinite(event?.progress)) {
+      const isPiper = message.provider === "piper";
+      if (isPiper && message.voiceId) {
+        const previous = piperStates.get(message.voiceId) || {};
+        setPiperVoiceState(message.voiceId, { state: "loading", installed: previous.installed || event.phase !== "download", phase: event.phase || "initialize" });
+      }
       ui.downloadProgress.hidden = false;
       ui.downloadProgress.value = event.progress;
-      ui.modelStatus.textContent = `Preparando ${event.file || "modelo local"}: ${Math.round(event.progress)}%`;
+      ui.modelStatus.textContent = `${isPiper ? "Piper" : "Kokoro"} · ${event.file || event.voiceId || "modelo local"}: ${Math.round(event.progress)}%`;
+      updateVoiceProviderUI();
     }
+    return;
+  }
+  if (message.provider === "piper" && message.voiceId) {
+    const previous = piperStates.get(message.voiceId) || {};
+    setPiperVoiceState(message.voiceId, {
+      state: message.state,
+      installed: message.state === "idle" ? false : message.state === "cached" || message.state === "ready" || previous.installed,
+      phase: message.phase || "initialize",
+      error: message.state === "error" ? message.message : ""
+    });
+    if (message.message) ui.modelStatus.textContent = message.message;
+    ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
     return;
   }
   if (message.state === "loading") {
@@ -377,62 +368,30 @@ function handleModelMessage(message) {
   renderPlayer(player.snapshot());
 }
 
-function ensureStoredVoiceOption(voiceId) {
-  if (!isSystemVoiceId(voiceId) || [...ui.voice.options].some((option) => option.value === voiceId)) return;
-  const group = ui.voice.querySelector("#system-voice-options");
-  if (!group) return;
-  const option = document.createElement("option");
-  option.value = voiceId;
-  option.disabled = true;
-  option.textContent = "Voz del sistema guardada · no disponible";
-  group.append(option);
-}
-
 function selectVoice(voiceId) {
-  if (!voiceId) return;
-  ensureStoredVoiceOption(voiceId);
-  if ([...ui.voice.options].some((option) => option.value === voiceId)) ui.voice.value = voiceId;
+  const selected = isLegacySystemVoiceId(voiceId) ? PIPER_DEFAULT_VOICE_ID : voiceId;
+  if (selected && [...ui.voice.options].some((option) => option.value === selected)) ui.voice.value = selected;
   updateVoiceProviderUI();
 }
 
-async function refreshSystemVoices() {
-  const group = ui.voice.querySelector("#system-voice-options");
+async function refreshPiperModelStates() {
   try {
-    systemVoices = await systemVoiceCatalog.listVoices();
-    const selectedBeforeRefresh = ui.voice.value;
-    if (group) {
-      group.replaceChildren();
-      for (const voice of systemVoices) {
-        const option = document.createElement("option");
-        option.value = voice.id;
-        const connection = voice.localService === true ? "Local" : voice.localService === false ? "En línea" : "Sistema";
-        const state = ({ registered: "pendiente de prueba", "pending-test": "probando", "tested-successfully": "probada", "temporary-failure": "fallo temporal", interrupted: "interrumpida" })[voice.status] || "registrada";
-        option.textContent = `Español · ${voice.name} · ${voice.locale} · ${connection} · ${state}`;
-        group.append(option);
-      }
-      if (!systemVoices.length && !isSystemVoiceId(selectedBeforeRefresh)) {
-        const option = document.createElement("option");
-        option.value = "system-voices-unavailable";
-        option.disabled = true;
-        option.textContent = "No se encontraron voces españolas";
-        group.append(option);
-      }
-    }
-    ensureStoredVoiceOption(selectedBeforeRefresh);
-    if (selectedBeforeRefresh && [...ui.voice.options].some((option) => option.value === selectedBeforeRefresh)) {
-      ui.voice.value = selectedBeforeRefresh;
+    const { voices = [] } = await player.listInstalledPiperModels();
+    for (const voice of voices) {
+      setPiperVoiceState(voice.voiceId, {
+        state: voice.installed ? "cached" : "idle",
+        installed: Boolean(voice.installed),
+        modelSizeBytes: voice.modelSizeBytes,
+        error: voice.reason || ""
+      });
     }
   } catch (error) {
-    const selectedBeforeRefresh = ui.voice.value;
-    systemVoices = [];
-    ensureStoredVoiceOption(selectedBeforeRefresh);
-    ui.modelStatus.textContent = showError(error, "voice");
+    for (const voice of PIPER_VOICE_CATALOG) setPiperVoiceState(voice.id, { state: "error", installed: false, phase: "status", error: error.message || String(error) });
+    ui.modelStatus.textContent = showError(error, "model");
   }
   updateVoiceProviderUI();
   renderPlayer(player.snapshot());
 }
-
-systemVoiceCatalog.onCatalogChange(() => { void refreshSystemVoices(); });
 
 function updateTextInfo() {
   const text = ui.text.value;
@@ -559,9 +518,7 @@ async function loadEditorToPlayer() {
       await player.stop();
     }
     previousQueue = player.session ? { ...player.session } : null;
-    // System voices are checked in the same offscreen provider used by playback.
-    // Kokoro stays lazy: loading text never downloads the model or synthesizes audio.
-    if (isSystemVoiceId(voice)) await player.initialize(voice);
+    // Queue loading never downloads a model or synthesizes audio.
     await flushPersistence();
     const prepared = preparePlaybackQueue({
       editorSession: currentSession,
@@ -580,16 +537,14 @@ async function loadEditorToPlayer() {
       ...(currentDocument?.id ? { lastDocumentId: currentDocument.id } : {}),
       lastSessionId: currentSession.id
     });
-    ui.queueSyncStatus.textContent = isSystemVoiceId(voice)
-      ? "Cola cargada · SpeechSynthesis se iniciará al reproducir."
-      : "Cola cargada · el primer audio se generará al reproducir.";
+    ui.queueSyncStatus.textContent = "Cola cargada · el primer audio local se generará al reproducir.";
     ui.queueSyncStatus.dataset.state = "current";
     if (ui.library.open) await refreshLibrary();
     await refreshStorageUsage();
     return true;
   } catch (error) {
     player.setSession(previousQueue);
-    const message = showError(error, isSystemVoiceId(voice) ? "voice" : "playback");
+    const message = showError(error, "playback");
     loadFailure = `No se pudo cargar la cola. ${message}`;
     return false;
   } finally {
@@ -609,9 +564,15 @@ async function startCurrentPlayback() {
   const voice = queue.voice || queue.voiceId;
   const provider = getVoiceProvider(voice);
   const hasCachedAudio = Boolean(queue.audioKeys?.[player.snapshot().selectedIndex]);
-  if (provider === "kokoro" && !hasCachedAudio && modelState !== "ready") {
-    if (!["idle", "cached"].includes(modelState)) return false;
-    const initialized = await initializeModel();
+  const state = controlsModelState(voice);
+  if (!hasCachedAudio && state !== "ready") {
+    if (provider === "piper" && !piperStates.get(voice)?.installed) {
+      ui.modelStatus.textContent = "Descarga el modelo Piper seleccionado antes de iniciar la lectura.";
+      updateVoiceProviderUI();
+      return false;
+    }
+    if (provider === "kokoro" && !["idle", "cached"].includes(state)) return false;
+    const initialized = provider === "piper" ? await initializePiperVoice(voice) : await initializeModel();
     if (!initialized || player.session?.id !== queue.id
         || !playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) return false;
   }
@@ -656,6 +617,7 @@ async function refreshLibrary() {
     const heading = document.createElement("strong");
     heading.className = "library-entry-title";
     heading.textContent = title;
+    heading.title = title;
     const metadata = document.createElement("span");
     metadata.className = "library-entry-meta";
     metadata.textContent = detail;
@@ -669,7 +631,7 @@ async function refreshLibrary() {
     open.addEventListener("click", onOpen);
     const proceed = document.createElement("button");
     proceed.type = "button";
-    proceed.className = "library-open library-continue";
+    proceed.className = "library-open library-resume";
     proceed.textContent = continueLabel;
     proceed.addEventListener("click", onContinue);
     const remove = document.createElement("button");
@@ -703,7 +665,7 @@ async function refreshLibrary() {
         sessionActions.className = "library-entry-actions";
         const resume = document.createElement("button");
         resume.type = "button";
-        resume.className = "library-open";
+        resume.className = "library-open library-resume";
         resume.textContent = "Reanudar";
         resume.addEventListener("click", () => { if (!libraryMutationBusy) void resumeLibrarySession(session, activateSession, startCurrentPlayback).catch(showError); });
         const deleteSession = document.createElement("button");
@@ -1067,8 +1029,80 @@ async function refreshModelCacheState() {
   renderPlayer(player.snapshot());
 }
 
-async function initializeModel() {
-  if (isSystemVoiceId(ui.voice.value)) return false;
+async function installPiperModel(voiceId = ui.voice.value) {
+  const existingTask = piperInstallPromises.get(voiceId);
+  if (existingTask) return existingTask;
+  const voice = getVoiceRecord(voiceId);
+  if (voice.provider !== "piper") return false;
+  const previous = piperStates.get(voiceId) || {};
+  setPiperVoiceState(voiceId, { state: "loading", phase: "download", installed: Boolean(previous.installed), error: "" });
+  ui.modelStatus.textContent = `Descargando el modelo oficial ${voice.label}.`;
+  ui.downloadProgress.hidden = false;
+  ui.downloadProgress.removeAttribute("value");
+  updateVoiceProviderUI();
+  renderPlayer(player.snapshot());
+  const task = player.installPiperModel(voiceId).then((result) => {
+    setPiperVoiceState(voiceId, { state: "cached", phase: "download", installed: true, error: "" });
+    ui.modelStatus.textContent = `Modelo Piper descargado y verificado · ${voice.label}. Pulsa «Probar voz» para inicializarlo y escuchar una muestra, o «Preparar voz Piper» para dejarlo listo.`;
+    ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
+    return Boolean(result?.installed);
+  }).catch((error) => {
+    setPiperVoiceState(voiceId, { state: "error", phase: "download", installed: Boolean(previous.installed), error: error.message || String(error) });
+    ui.modelStatus.textContent = showError(error, "model");
+    ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
+    return false;
+  }).finally(() => piperInstallPromises.delete(voiceId));
+  piperInstallPromises.set(voiceId, task);
+  return task;
+}
+
+async function initializePiperVoice(voiceId = ui.voice.value) {
+  const voice = getVoiceRecord(voiceId);
+  if (voice.provider !== "piper") return false;
+  const state = piperStates.get(voiceId);
+  if (!state?.installed) {
+    ui.modelStatus.textContent = `Descarga primero ${voice.label}; la descarga es manual y no comienza al cargar el texto.`;
+    updateVoiceProviderUI();
+    return false;
+  }
+  setPiperVoiceState(voiceId, { state: "loading", phase: "initialize", error: "" });
+  ui.modelStatus.textContent = `Inicializando ${voice.label} en el motor local.`;
+  ui.downloadProgress.hidden = false;
+  ui.downloadProgress.removeAttribute("value");
+  updateVoiceProviderUI();
+  renderPlayer(player.snapshot());
+  try {
+    await player.initialize(voiceId);
+    setPiperVoiceState(voiceId, { state: "ready", phase: "initialize", installed: true, error: "" });
+    ui.modelStatus.textContent = `Voz lista · ${voice.label}. El audio WAV se generará al reproducir.`;
+    ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
+    return true;
+  } catch (error) {
+    setPiperVoiceState(voiceId, { state: "error", phase: "initialize", installed: true, error: error.message || String(error) });
+    ui.modelStatus.textContent = showError(error, "model");
+    ui.downloadProgress.hidden = true;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
+    return false;
+  }
+}
+
+async function handleInstallAction() {
+  const voiceId = ui.voice.value;
+  if (getVoiceProvider(voiceId) === "piper") {
+    return piperStates.get(voiceId)?.installed ? initializePiperVoice(voiceId) : installPiperModel(voiceId);
+  }
+  return initializeModel();
+}
+
+async function initializeModel(voiceId = ui.voice.value) {
+  if (getVoiceProvider(voiceId) !== "kokoro") return false;
   if (initializationPromise) return initializationPromise;
   modelState = "loading";
   ui.modelStatus.textContent = "Cargando Kokoro y sus recursos locales bajo demanda.";
@@ -1079,7 +1113,7 @@ async function initializeModel() {
 
   initializationPromise = (async () => {
     const result = await attemptInitialization(
-      () => player.initialize(ui.voice.value),
+      () => player.initialize(voiceId),
       (state) => {
         if (state === "loading" || state === "error") modelState = state;
         updateVoiceProviderUI();
@@ -1457,15 +1491,19 @@ async function deleteRecoveredLibraryEntry(entry) {
 
 async function boot() {
   await repository.cleanEmptyDocuments();
-  void refreshSystemVoices();
+  await refreshPiperModelStates();
   const preferences = await chrome.storage.local.get(["lastDocumentId", "lastSessionId", "lastVoice", "speed"]);
-  if (preferences.lastVoice) selectVoice(preferences.lastVoice);
+  if (preferences.lastVoice) {
+    selectVoice(preferences.lastVoice);
+    if (isLegacySystemVoiceId(preferences.lastVoice)) await chrome.storage.local.set({ lastVoice: PIPER_DEFAULT_VOICE_ID });
+  }
   if (preferences.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(preferences.speed))) ui.speed.value = String(preferences.speed);
   const preferredSession = preferences.lastSessionId ? await repository.getSession(preferences.lastSessionId) : null;
   currentDocument = preferences.lastDocumentId ? await repository.getDocument(preferences.lastDocumentId) : null;
   if (!currentDocument && preferredSession) {
     await activateSession(preferredSession);
     await refreshModelCacheState();
+    if (currentSession?.voiceMigrationNotice) ui.fileStatus.textContent = currentSession.voiceMigrationNotice;
     await refreshActiveTabContext();
     const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
     if (pending?.selection) handlePendingSelection(pending.selection);
@@ -1475,6 +1513,7 @@ async function boot() {
   if (!currentDocument) await createNewDraft();
   else await activateDocument(currentDocument, preferences.lastSessionId, false, { restoreSession: true });
   await refreshModelCacheState();
+  if (currentSession?.voiceMigrationNotice) ui.fileStatus.textContent = currentSession.voiceMigrationNotice;
   await refreshActiveTabContext();
   const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
   if (pending?.selection) handlePendingSelection(pending.selection);
@@ -1679,11 +1718,18 @@ ui.voice.addEventListener("change", () => {
 });
 
 ui.loadPlayer.addEventListener("click", () => { void loadEditorToPlayer(); });
-ui.install.addEventListener("click", () => { void initializeModel(); });
-ui.refreshVoices.addEventListener("click", () => { void refreshSystemVoices(); });
+ui.install.addEventListener("click", () => { void handleInstallAction(); });
 ui.test.addEventListener("click", () => {
-  if (!readerControls().canTestVoice) return;
-  void player.preview(ui.voice.value).catch(showError);
+  const voiceId = ui.voice.value;
+  const provider = getVoiceProvider(voiceId);
+  const controls = readerControls();
+  if (!controls.canRequestVoiceTest) return;
+  void prepareAndRunVoiceTest({
+    provider,
+    modelState: controlsModelState(voiceId),
+    initialize: () => provider === "piper" ? initializePiperVoice(voiceId) : initializeModel(voiceId),
+    runTest: () => player.preview(voiceId)
+  }).catch(showError);
 });
 ui.play.addEventListener("click", () => {
   void startCurrentPlayback().catch(showError);
@@ -1739,6 +1785,22 @@ ui.deleteModel.addEventListener("click", async () => {
     renderPlayer(player.snapshot());
     await refreshStorageUsage();
   } catch (error) { showError(error); }
+});
+
+ui.deletePiperModel?.addEventListener("click", async () => {
+  const voiceId = ui.voice.value;
+  const voice = getVoiceRecord(voiceId);
+  if (voice.provider !== "piper") return;
+  if (!confirm(`Eliminar únicamente el modelo ${voice.label} de este dispositivo? Los documentos, sesiones y audios generados se conservarán.`)) return;
+  try {
+    await player.stop().catch(() => {});
+    await player.deletePiperModel(voiceId);
+    setPiperVoiceState(voiceId, { state: "idle", phase: "download", installed: false, error: "" });
+    ui.modelStatus.textContent = `Modelo ${voice.label} eliminado. Los audios WAV ya generados se conservaron.`;
+    updateVoiceProviderUI();
+    renderPlayer(player.snapshot());
+    await refreshStorageUsage();
+  } catch (error) { showError(error, "model"); }
 });
 
 function showError(error, action = "general") {

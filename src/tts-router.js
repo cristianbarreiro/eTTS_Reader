@@ -1,32 +1,35 @@
-import { isSystemVoiceId } from "./voice-catalog.js";
+import { getVoiceProvider, getVoiceRecord } from "./voice-catalog.js";
 
 export class TTSProviderRouter {
-  constructor({ kokoro, systemSpeech }) {
-    if (!kokoro || !systemSpeech) throw new TypeError("Se requieren los proveedores Kokoro y SpeechSynthesis.");
+  constructor({ kokoro, piper }) {
+    if (!kokoro || !piper) throw new TypeError("Se requieren los proveedores locales Kokoro y Piper.");
     this.kokoro = kokoro;
-    this.systemSpeech = systemSpeech;
+    this.piper = piper;
   }
 
   async initialize(onProgress = () => {}, voice = "af_heart") {
-    if (isSystemVoiceId(voice)) {
-      const available = (await this.systemSpeech.listVoices()).some((item) => item.id === voice);
-      if (!available) throw new Error("La voz española del sistema ya no está disponible. Actualiza la lista de voces.");
-      return { provider: "speechSynthesis", voices: [voice] };
+    const provider = getVoiceProvider(voice);
+    if (provider === "kokoro") {
+      const result = await this.kokoro.initialize(onProgress);
+      return { ...result, provider };
     }
-    const result = await this.kokoro.initialize(onProgress);
-    return { ...result, provider: "kokoro" };
+    const result = await this.piper.initialize(voice, onProgress);
+    return { ...result, provider };
   }
 
-  async synthesize(text, voice) {
-    return isSystemVoiceId(voice)
-      ? this.systemSpeech.synthesize(text, voice)
-      : this.kokoro.synthesize(text, voice);
+  async synthesize(text, voice, options = {}) {
+    const provider = getVoiceProvider(voice);
+    if (provider === "kokoro") return this.kokoro.synthesize(text, voice);
+    return this.piper.synthesize(text, voice, options.onProgress);
   }
 
-  listSystemVoices() { return this.systemSpeech.listVoices(); }
+  piperCatalog() { return this.piper.catalog(); }
+  piperModelStatus(voiceId) { getVoiceRecord(voiceId); return this.piper.modelStatus(voiceId); }
+  installPiperModel(voiceId, onProgress) { getVoiceRecord(voiceId); return this.piper.installModel(voiceId, onProgress); }
+  deletePiperModel(voiceId) { getVoiceRecord(voiceId); return this.piper.removeModel(voiceId); }
+  listInstalledPiperModels() { return this.piper.listInstalled(); }
 
   async dispose() {
-    this.systemSpeech.cancel();
-    await this.kokoro.dispose();
+    await Promise.allSettled([this.kokoro.dispose(), this.piper.dispose()]);
   }
 }

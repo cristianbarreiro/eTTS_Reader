@@ -1,41 +1,39 @@
-# Proveedores de voz
+# Proveedores de voz locales
 
-## Disponibilidad en esta versión
+## Kokoro · inglés
 
-- `af_heart` y `am_michael` usan Kokoro, Transformers.js y ONNX Runtime Web. Kokoro genera WAV, mantiene su caché y puede exportar cada fragmento.
-- Las voces españolas se consultan dinámicamente con `speechSynthesis.getVoices()` y se muestran por su nombre e idioma reales. Solo aparecen si Edge/Windows informa una voz cuyo idioma empieza por `es`.
-- No se asigna género a una voz del sistema: la API no ofrece un dato fiable para ello. La extensión no inventa perfiles «femenino» o «masculino».
-- SpeechSynthesis usa la voz que administra el sistema. No descarga un modelo con la extensión, no garantiza que la voz esté disponible sin conexión, no ofrece WAV exportable y no da duración o búsqueda temporal exactas. La voz puede usar componentes o servicios del sistema según la configuración de Edge/Windows. No se describe como síntesis neuronal local ni se promete que el texto permanezca dentro del proceso de la extensión.
-- La voz del sistema comparte la cola, el reproductor, la pausa, la reanudación, la detención, la velocidad y el avance entre fragmentos. Al cambiar la velocidad durante un fragmento, ese fragmento vuelve a comenzar porque SpeechSynthesis no permite cambiar de forma fiable la velocidad de una locución ya iniciada. La recuperación de una sesión vuelve a comenzar el fragmento seleccionado; el sistema no expone una posición temporal exacta.
+`af_heart` y `am_michael` usan Kokoro, Transformers.js y la versión de ONNX Runtime que resuelve Transformers.js. El motor se ejecuta en WASM/CPU y conserva su caché/modelos de acuerdo con la configuración existente.
 
-La selección de una voz de Edge/Windows es explícita: la extensión nunca la elige como sustituto silencioso de Kokoro. Si no se encuentra ninguna voz española, el selector lo indica. La consulta se realiza desde el panel y no inicializa ni descarga Kokoro.
+## Piper · español
 
-## Auditoría de alternativas neuronales españolas
+Las voces españolas usan Piper con ONNX Runtime Web `1.22.0` y el fonemizador WASM empaquetado. Piper se ejecuta en un Worker local; el texto no se envía a un servicio de voz. Los modelos se descargan solo al pulsar **Descargar voz**, se guardan en OPFS y se verifican con el tamaño y SHA-256 fijados en `src/voice-catalog.js`.
 
-### `loudness-tts`
+### Evaluación de `@mintplex-labs/piper-tts-web`
 
-La versión publicada revisada es `0.1.1`; su `package.json` declara `GPL-3.0-or-later` y `onnxruntime-web@1.30.0`. El README atribuye la licencia GPL a la combinación de Piper y eSpeak-NG y explica que el navegador descarga los archivos del motor desde jsDelivr salvo que se sirvan localmente. Esta extensión no incorporó el paquete ni cambió su licencia: el repositorio no declara una licencia de distribución y no se resolvió si se aceptarían las obligaciones de GPL al distribuir el paquete. Tampoco se integraron los binarios o recursos de eSpeak-NG. Antes de reconsiderarlo habría que decidir la política de licencia, fijar las versiones, resolver la coexistencia con el ONNX Runtime ya instalado y comprobar el build MV3 con todos los recursos servidos desde la extensión.
+Se evaluó la versión `1.0.5`. Su API documentada descarga, consulta y predice por `voiceId` de su catálogo integrado, pero no expone una interfaz documentada para registrar los modelos Daniela y DaveFX con sus rutas de Hugging Face fijadas, revisiones concretas y validación de SHA-256 antes de guardar. Para mantener esa verificación y el almacenamiento por voz sin modificar internamente un catálogo ajeno, la extensión integra ONNX Runtime Web y el fonemizador Piper WASM directamente. La API de la biblioteca y su ejemplo de Web Worker están descritos en su [README upstream](https://github.com/Mintplex-Labs/piper-tts-web/blob/main/README.md).
 
-Fuentes: [paquete JavaScript `loudness-tts`](https://github.com/Loudness-ai/loudness-tts/blob/main/javascript/package.json), [README JavaScript y privacidad/licencias](https://github.com/Loudness-ai/loudness-tts/blob/main/javascript/README.md).
+| Voz | Variante | Tamaño | Revisión del repositorio |
+|---|---|---:|---|
+| Daniela | `es_AR`, calidad alta | 114,199,011 bytes | `375a0fe641dea077c2a47b4e9a056d6da521eed3` |
+| DaveFX | `es_ES`, calidad media | 63,201,294 bytes | `2f8dbe0bb0dde986411632bf014a13cdbe6596e7` |
 
-### `piper-plus`
+Los pesos se obtienen de [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices), fijados a las revisiones listadas. Los modelos no se incluyen en el repositorio ni en el ZIP de la extensión. Sus fichas indican los datos/licencias asociados a cada voz: [Daniela](https://huggingface.co/rhasspy/piper-voices/blob/375a0fe641dea077c2a47b4e9a056d6da521eed3/es/es_AR/daniela/high/MODEL_CARD) documenta CC BY-SA 4.0 para el conjunto de datos; [DaveFX](https://huggingface.co/rhasspy/piper-voices/blob/2f8dbe0bb0dde986411632bf014a13cdbe6596e7/es/es_ES/davefx/medium/MODEL_CARD) documenta CC0. Los metadatos del repositorio de modelos indican MIT; la licencia de los datos de entrenamiento y la del artefacto del modelo son datos distintos. Revisa las fichas upstream antes de redistribuir pesos o audio.
 
-El proyecto declara su motor MIT y dispone de herramientas WebAssembly y fonemización española. Sin embargo, usa su propio inventario G2P/fonémico y declara incompatibles los modelos Piper publicados en `rhasspy/piper-voices`. El candidato de seis idiomas `zs-v1` se identifica como experimental y usa condicionamiento por audio de referencia; no se verificaron dos voces españolas identificadas por género y región para la compilación JS/WASM de esta extensión. Su documentación no aporta una pareja lista para instalar y validar como `Claude`/`Ald` dentro de Edge MV3. No se añadió la dependencia ni se descargaron sus pesos.
+La extensión convierte cada fragmento en WAV local. El reproductor puede reproducirlo, medir su duración, pausarlo, buscar en él y descargarlo. Las claves de caché incluyen proveedor, voz, revisión de modelo y versión del runtime, por lo que una voz Piper no reutiliza audio Kokoro ni audio de una revisión anterior.
 
-Fuentes: [README de piper-plus](https://github.com/ayutaz/piper-plus/blob/dev/README_EN.md), [compatibilidad de modelos](https://github.com/ayutaz/piper-plus/blob/dev/docs/guides/development/pretrained-models.md), [ficha experimental `zs-v1`](https://huggingface.co/ayousanz/piper-plus-base/blob/3620ed788667cb76f08bd6cf2db8152c1f4c8bd1/releases/zs-v1/README.md).
+## Migración desde voces Edge/Windows
 
-### Modelos upstream Piper evaluados
+La extensión ya no consulta ni llama `SpeechSynthesis`. Al abrir una sesión antigua que usaba una voz `system:*`, cambia su voz a Daniela, conserva documento, texto, fragmento y progreso, e invalida las referencias al audio anterior. No inicia reproducción automáticamente. El modelo se descarga solo con la acción explícita del usuario.
 
-Los nombres `Claude` (español de México, calidad High) y `Ald` (español de México, calidad Medium) aparecen en el catálogo de `rhasspy/piper-voices`. Sus fichas describen las licencias del conjunto de datos como Apache-2.0 para Claude y Unlicense para Ald; esas condiciones pertenecen al material de voz y son distintas de la licencia del runtime. Estos checkpoints no son compatibles con piper-plus y no se empaquetan en la extensión. No se afirma que sean aptos para redistribución comercial.
+## Runtime y licencias
 
-Fuentes: [ficha de Claude](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/claude/high/MODEL_CARD), [ficha de Ald](https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/ald/medium/MODEL_CARD).
+- `@huggingface/transformers` declara Apache-2.0.
+- `onnxruntime-web` declara MIT. Kokoro conserva su runtime resuelto por Transformers.js; Piper utiliza el paquete raíz exacto `1.22.0`, sin deduplicar ambas versiones.
+- `@noble/hashes` declara MIT y se usa para verificar las descargas en streaming.
+- `@diffusionstudio/piper-wasm` declara MIT, pero su README indica que los binarios se construyen con Piper phonemize y eSpeak-NG. eSpeak NG declara GPL-3.0-or-later; revisa la procedencia exacta del WASM y las obligaciones de redistribución antes de distribuir la extensión.
+- Las licencias declaradas para el runtime, los datos de voz y el archivo generado no determinan la licencia global de este repositorio. El proyecto no contiene un archivo `LICENSE`.
+- El inventario ampliado y las referencias upstream están en [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
-## Licencias del repositorio y dependencias
+## Verificación
 
-El repositorio no tiene un archivo `LICENSE` ni un campo `license` en `package.json` (el paquete está marcado como `private`). Esto no determina por sí solo los derechos de distribución de la extensión. No se añadió una licencia ni se concluyó que pueda distribuirse una combinación con `loudness-tts` GPL.
-
-No se añadió ninguna dependencia ni modelo vocal español. Kokoro y sus modelos ingleses siguen sujetos a sus respectivas licencias y avisos de upstream; Transformers.js y ONNX Runtime Web permanecen en las versiones fijadas por `package-lock.json`. Revisa los términos de cada artefacto antes de redistribuir una compilación.
-
-## Prueba pendiente
-
-Las pruebas automatizadas simulan la enumeración, la reproducción, la pausa, la velocidad, la cancelación y la cola de SpeechSynthesis. No demuestran que Edge/Windows tenga voces españolas instaladas ni que una voz concreta produzca audio audible. La compilación de esta tarea no se ha probado manualmente en Edge con dos voces españolas, sin conexión o con una descarga de modelos porque este proveedor del sistema no administra ni descarga modelos. La aceptación de voces neurales femeninas y masculinas con WAV local queda pendiente de elegir una ruta de licencia compatible y validar dos modelos concretos en la extensión.
+La compilación automatizada comprueba las versiones y copia los artefactos requeridos a `dist/ort`, `dist/ort/piper` y `dist/piper`. Las pruebas automatizadas cubren el catálogo, la migración, la caché y los errores de descarga con almacenamiento simulado. La inicialización real, la generación audible y el WAV descargado deben verificarse en Edge con la extensión compilada; una compilación correcta no prueba que la síntesis funcione.

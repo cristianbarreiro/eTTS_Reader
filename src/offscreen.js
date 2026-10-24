@@ -1,17 +1,15 @@
 import { ReaderRepository } from "./persistence.js";
 import { KokoroWorkerClient } from "./tts-worker-client.js";
-import { SystemSpeechProvider } from "./system-speech.js";
+import { PiperWorkerClient } from "./piper-worker-client.js";
 import { TTSProviderRouter } from "./tts-router.js";
 import { PersistentReaderEngine } from "./persistent-engine.js";
 
 const repository = new ReaderRepository();
-const speech = new SystemSpeechProvider();
-const inference = new TTSProviderRouter({ kokoro: new KokoroWorkerClient(), systemSpeech: speech });
+const inference = new TTSProviderRouter({ kokoro: new KokoroWorkerClient(), piper: new PiperWorkerClient() });
 const engine = new PersistentReaderEngine({
   audio: document.querySelector("#audio"),
   repository,
   inference,
-  speech,
   publish: (message) => { void chrome.runtime.sendMessage(message).catch(() => {}); }
 });
 

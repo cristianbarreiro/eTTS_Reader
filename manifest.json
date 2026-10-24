@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Lector local para Edge",
   "version": "0.5.0",
-  "description": "Lee texto y documentos con Kokoro local o voces disponibles de Edge/Windows.",
+  "description": "Lee texto y documentos con Kokoro inglés y Piper español, de forma local.",
   "action": {
     "default_title": "Abrir lector local",
     "default_icon": {

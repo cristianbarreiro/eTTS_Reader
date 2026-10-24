@@ -1,15 +1,29 @@
 export function deriveReaderControls(modelState, chunkCount, audioPlaying = false, {
-  provider = "kokoro", systemVoiceAvailable = false, audioAvailable = false, allowLazyInitialization = false
+  provider = "kokoro", audioAvailable = false, allowLazyInitialization = false,
+  allowLazyVoiceTest = false
 } = {}) {
   const modelReady = modelState === "ready";
-  const systemProvider = provider === "speechSynthesis";
+  const piperProvider = provider === "piper";
   const lazyStartAvailable = allowLazyInitialization && ["idle", "cached"].includes(modelState);
+  const lazyVoiceTestAvailable = allowLazyVoiceTest && (piperProvider
+    ? modelState === "cached"
+    : ["idle", "cached"].includes(modelState));
   return {
-    canInitialize: !systemProvider && modelState !== "loading" && !modelReady,
-    canPlay: (systemProvider ? systemVoiceAvailable : modelReady || audioAvailable || lazyStartAvailable) && chunkCount > 0,
-    canTestVoice: systemProvider ? systemVoiceAvailable : modelReady,
+    canInitialize: modelState !== "loading" && !modelReady,
+    canPlay: (modelReady || audioAvailable || (!piperProvider && lazyStartAvailable)) && chunkCount > 0,
+    canTestVoice: modelReady,
+    canRequestVoiceTest: modelReady || lazyVoiceTestAvailable,
     canPause: audioPlaying
   };
+}
+
+export async function prepareAndRunVoiceTest({ provider, modelState, initialize, runTest }) {
+  if (["piper", "kokoro"].includes(provider) && modelState !== "ready") {
+    const initialized = await initialize();
+    if (!initialized) return false;
+  }
+  await runTest();
+  return true;
 }
 
 export async function attemptInitialization(initialize, onState = () => {}) {

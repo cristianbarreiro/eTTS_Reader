@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { makeAudioCacheKey, ReaderRepository } from "../src/persistence.js";
+import { PIPER_DEFAULT_VOICE_ID } from "../src/voice-catalog.js";
 
 class FakeRequest {}
 
@@ -179,15 +180,29 @@ test("session persistence retains failed chunk state and its retryable error", a
   assert.equal(saved.lastError, "Kokoro no pudo iniciar.");
 });
 
-test("session voice provider metadata is normalized from the current voice ID", async () => {
+test("legacy Edge sessions migrate in IndexedDB while preserving text and position and dropping stale audio references", async () => {
   const repository = makeRepository();
-  const saved = await repository.saveSession({
-    id: "voice-session", sourceText: "Hola.", chunks: ["Hola."],
-    voice: "system:urn%3Asabina", voiceId: "af_heart", voiceProvider: "kokoro"
+  const database = await repository.open();
+  database.stores.get("sessions").records.set("legacy-voice", {
+    id: "legacy-voice", documentId: "doc-legacy", sourceDocumentName: "nota.txt",
+    sourceText: "Hola. Adiós.", chunks: ["Hola.", "Adiós."], selectedIndex: 1, position: 1.75,
+    status: "playing", voice: "system:urn%3Asabina", voiceProvider: "speechSynthesis",
+    audioKeys: ["old-audio-a", "old-audio-b"], chunkStates: ["ready", "ready"], durations: [2, 3]
   });
-  assert.equal(saved.voice, "system:urn%3Asabina");
-  assert.equal(saved.voiceId, "system:urn%3Asabina");
-  assert.equal(saved.voiceProvider, "speechSynthesis");
+  const migrated = await repository.getSession("legacy-voice");
+  assert.equal(migrated.voice, PIPER_DEFAULT_VOICE_ID);
+  assert.equal(migrated.voiceId, PIPER_DEFAULT_VOICE_ID);
+  assert.equal(migrated.voiceProvider, "piper");
+  assert.equal(migrated.documentId, "doc-legacy");
+  assert.equal(migrated.sourceText, "Hola. Adiós.");
+  assert.deepEqual(migrated.chunks, ["Hola.", "Adiós."]);
+  assert.equal(migrated.selectedIndex, 1);
+  assert.equal(migrated.position, 1.75);
+  assert.equal(migrated.status, "interrupted");
+  assert.deepEqual(migrated.audioKeys, [null, null]);
+  assert.deepEqual(migrated.chunkStates, ["pending", "pending"]);
+  assert.deepEqual(migrated.durations, [null, null]);
+  assert.equal((await repository.getSession("legacy-voice")).voice, PIPER_DEFAULT_VOICE_ID, "the migration is saved and idempotent");
 });
 
 test("audio chunks are stored as local Blobs and reusable by stable synthesis keys", async () => {
@@ -197,6 +212,8 @@ test("audio chunks are stored as local Blobs and reusable by stable synthesis ke
   const changedTextKey = await makeAudioCacheKey("Read me again.", "af_heart");
   const changedVoiceKey = await makeAudioCacheKey("Read me.", "am_michael");
   const changedProviderKey = await makeAudioCacheKey("Read me.", "af_heart", undefined, "other-provider");
+  const piperKey = await makeAudioCacheKey("Read me.", "piper:es_AR-daniela-high", "rhasspy/piper-voices/es/es_AR/daniela/high", "piper", "piper-web-runtime@1.0.0;375a0fe");
+  const nextModelKey = await makeAudioCacheKey("Read me.", "piper:es_AR-daniela-high", "rhasspy/piper-voices/es/es_AR/daniela/high", "piper", "piper-web-runtime@1.0.0;next-revision");
   await repository.saveAudioChunk({ id: key, blob, voice: "af_heart", format: "wav", sampleRate: 24000, duration: 1.1 });
   const stored = await repository.getAudioChunk(key);
   assert.equal(stored.blob.size, blob.size);
@@ -204,6 +221,8 @@ test("audio chunks are stored as local Blobs and reusable by stable synthesis ke
   assert.notEqual(key, changedTextKey);
   assert.notEqual(key, changedVoiceKey);
   assert.notEqual(key, changedProviderKey);
+  assert.notEqual(key, piperKey);
+  assert.notEqual(piperKey, nextModelKey, "a model revision change creates a distinct audio cache key");
   await assert.rejects(repository.saveAudioChunk({ id: "invalid", blob: new Blob() }), /identificador y un Blob WAV válido/);
 });
 

@@ -1,5 +1,5 @@
 import { splitText } from "./text.js";
-import { getVoiceProvider } from "./voice-catalog.js";
+import { getVoiceProvider, migrateLegacyVoiceSession } from "./voice-catalog.js";
 
 const DB_NAME = "edge-local-reader";
 const DB_VERSION = 1;
@@ -166,41 +166,54 @@ export class ReaderRepository {
     return record;
   }
 
-  async getSession(id) { return this._read("sessions", (store) => store.get(id)); }
+  async _migrateSessionRecord(record) {
+    if (!record) return record;
+    const result = migrateLegacyVoiceSession(record);
+    if (!result.migrated) return result.session;
+    await this._write("sessions", (store) => store.put(result.session));
+    return result.session;
+  }
+
+  async getSession(id) {
+    return this._migrateSessionRecord(await this._read("sessions", (store) => store.get(id)));
+  }
 
   async listSessions(documentId) {
     const records = await this._read("sessions", (store) => store.getAll());
-    return records
+    const migrated = await Promise.all(records.map((record) => this._migrateSessionRecord(record)));
+    return migrated
       .filter((session) => !documentId || session.documentId === documentId)
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   }
 
   async saveSession(session) {
-    const previous = session.id ? await this.getSession(session.id) : null;
+    const previousRaw = session.id ? await this._read("sessions", (store) => store.get(session.id)) : null;
+    const previous = previousRaw ? migrateLegacyVoiceSession(previousRaw).session : null;
+    const normalizedSession = migrateLegacyVoiceSession(session).session;
     const now = Date.now();
-    const chunks = Array.isArray(session.chunks) ? [...session.chunks] : [];
-    const audioKeys = Array.isArray(session.audioKeys) ? [...session.audioKeys] : [];
+    const chunks = Array.isArray(normalizedSession.chunks) ? [...normalizedSession.chunks] : [];
+    const audioKeys = Array.isArray(normalizedSession.audioKeys) ? [...normalizedSession.audioKeys] : [];
     const validChunkStates = new Set(["pending", "generating", "ready", "error"]);
-    const suppliedChunkStates = Array.isArray(session.chunkStates) ? session.chunkStates : [];
-    const voiceId = session.voice || session.voiceId || previous?.voice || previous?.voiceId || "af_heart";
+    const suppliedChunkStates = Array.isArray(normalizedSession.chunkStates) ? normalizedSession.chunkStates : [];
+    const voiceId = normalizedSession.voice || normalizedSession.voiceId || previous?.voice || previous?.voiceId || "af_heart";
     const record = {
-      ...session,
-      id: session.id || makeId("session"),
-      documentId: session.documentId || null,
-      sourceDocumentName: String(session.sourceDocumentName || previous?.sourceDocumentName || ""),
-      sourceText: String(session.sourceText ?? ""),
+      ...normalizedSession,
+      id: normalizedSession.id || makeId("session"),
+      documentId: normalizedSession.documentId || null,
+      sourceDocumentName: String(normalizedSession.sourceDocumentName || previous?.sourceDocumentName || ""),
+      sourceText: String(normalizedSession.sourceText ?? ""),
       chunks,
       audioKeys,
       chunkStates: chunks.map((_, index) => audioKeys[index] ? "ready" : validChunkStates.has(suppliedChunkStates[index]) ? suppliedChunkStates[index] : "pending"),
-      selectedIndex: Math.max(0, Number(session.selectedIndex) || 0),
-      position: Math.max(0, Number(session.position) || 0),
-      status: session.status || "text-ready",
-      lastError: String(session.lastError || (session.status === "error" ? session.message : "") || ""),
+      selectedIndex: Math.max(0, Number(normalizedSession.selectedIndex) || 0),
+      position: Math.max(0, Number(normalizedSession.position) || 0),
+      status: normalizedSession.status || "text-ready",
+      lastError: String(normalizedSession.lastError || (normalizedSession.status === "error" ? normalizedSession.message : "") || ""),
       voice: voiceId,
       voiceId,
       voiceProvider: getVoiceProvider(voiceId),
-      speed: Number(session.speed) || 1,
-      createdAt: previous?.createdAt || session.createdAt || now,
+      speed: Number(normalizedSession.speed) || 1,
+      createdAt: previous?.createdAt || normalizedSession.createdAt || now,
       updatedAt: now
     };
     await this._write("sessions", (store) => store.put(record));
@@ -304,16 +317,18 @@ export class ReaderRepository {
   }
 }
 
-export async function makeAudioCacheKey(text, voice, modelId = "onnx-community/Kokoro-82M-v1.0-ONNX", provider = "kokoro") {
-  const value = `${provider}\n${modelId}\nkokoro-js@1.2.1\n@huggingface/transformers@3.8.1\nonnxruntime-web@1.22.0-dev.20250409-89f8206ba4\n${voice}\n${String(text)}`;
+export async function makeAudioCacheKey(text, voice, modelId = "onnx-community/Kokoro-82M-v1.0-ONNX", provider = "kokoro", providerVersion = "kokoro-js@1.2.1;transformers@3.8.1;onnxruntime-web@1.22.0-dev.20250409-89f8206ba4") {
+  const value = provider === "kokoro"
+    ? `${provider}\n${modelId}\nkokoro-js@1.2.1\n@huggingface/transformers@3.8.1\nonnxruntime-web@1.22.0-dev.20250409-89f8206ba4\n${voice}\n${String(text)}`
+    : `${provider}\n${modelId}\n${providerVersion}\n${voice}\n${String(text)}`;
   const bytes = new TextEncoder().encode(value);
   if (globalThis.crypto?.subtle) {
     const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-    return `kokoro-v1-${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    return `${provider}-v1-${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   }
   let hash = 2166136261;
   for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
-  return `kokoro-v1-${(hash >>> 0).toString(16)}`;
+  return `${provider}-v1-${(hash >>> 0).toString(16)}`;
 }
 
 export const READER_DATABASE = Object.freeze({ name: DB_NAME, version: DB_VERSION });

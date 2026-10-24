@@ -21,7 +21,7 @@ function snapshotFromSession(session = null) {
     duration: durations[index] ?? null,
     speed: Number(session?.speed) || 1,
     chunkStates: Array.isArray(session?.chunkStates) ? [...session.chunkStates] : chunks.map((_, chunkIndex) => session?.audioKeys?.[chunkIndex] ? "ready" : "pending"),
-    activeProvider: chunks.length ? session?.voiceProvider || getVoiceProvider(session?.voice || session?.voiceId) : null,
+    activeProvider: chunks.length ? session?.voiceProvider || getVoiceProvider(session?.voice || session?.voiceId || "af_heart") : null,
     activeVoiceId: chunks.length ? session?.voice || session?.voiceId || null : null,
     message: status === "interrupted"
       ? "La lectura se interrumpió. Pulsa Reanudar para continuar."
@@ -101,12 +101,12 @@ export class ReaderClient {
   }
 
   async play() {
-    if (!this.session) return false;
     if (this.state.activeKind === "preview") {
-      if (this.state.status === "completed") return this.preview(this.session.voice || "af_heart");
+      if (this.state.status === "completed") return this.preview(this.state.activeVoiceId || this.session?.voice || "af_heart");
       const response = await this.request("resume");
       return response.ok !== false;
     }
+    if (!this.session) return false;
     const response = await this.request("start", { session: this.session });
     return response.ok !== false;
   }
@@ -124,6 +124,11 @@ export class ReaderClient {
   setVoice(value) { return this.request("voice", { value }); }
   preview(voice) { return this.request("preview", { voice }); }
   initialize(voice = this.session?.voice || "af_heart") { return this.request("initialize", { voice }); }
+  piperCatalog() { return this.request("piper-catalog"); }
+  piperModelStatus(voiceId) { return this.request("piper-model-status", { voiceId }); }
+  listInstalledPiperModels() { return this.request("list-installed-piper-models"); }
+  installPiperModel(voiceId) { return this.request("install-piper-model", { voiceId }); }
+  deletePiperModel(voiceId) { return this.request("delete-piper-model", { voiceId }); }
   clearAudioCache() { return this.request("clear-audio-cache"); }
   deleteModel() { return this.request("delete-model"); }
   async forgetSession(sessionId, preserve = false) {

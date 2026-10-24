@@ -91,7 +91,7 @@ class MockAudio {
   }
 }
 
-function makePlayer({ synthesize, speech = null, getVoice = () => "af_heart", onState = () => {}, createObjectURL, revokeObjectURL } = {}) {
+function makePlayer({ synthesize, getVoice = () => "af_heart", onState = () => {}, createObjectURL, revokeObjectURL } = {}) {
   const audio = new MockAudio();
   const synthCalls = [];
   const revoked = [];
@@ -102,7 +102,6 @@ function makePlayer({ synthesize, speech = null, getVoice = () => "af_heart", on
       synthCalls.push({ text, options });
       return makeWavBlob();
     }),
-    speech,
     getVoice,
     onState,
     createObjectURL: createObjectURL || (() => `blob:reader-${++urlIndex}`),
@@ -365,89 +364,19 @@ test("voice sample can pause, resume, replay, and stop without document text", a
   assert.deepEqual(synthCalls.map(({ text }) => text), ["Hello."]);
 });
 
-test("system speech stays in starting state until the real start event and surfaces provider errors", async () => {
-  const voiceId = "system:Microsoft%20Sabina%00es-MX";
-  let callbacks;
-  let playCalls = 0;
-  const speech = {
-    play(_result, value) { playCalls++; callbacks = value; },
-    cancel() {}
-  };
-  const { player } = makePlayer({
-    speech,
-    getVoice: () => voiceId,
-    synthesize: async (text) => ({ kind: "system-speech", provider: "speechSynthesis", voiceId, text })
-  });
+test("Piper fragments use the shared WAV playback, seek, and download path", async () => {
+  const voiceId = "piper:es_AR-daniela-high";
+  const { audio, player } = makePlayer({ getVoice: () => voiceId });
   player.setChunks(["Hola."]);
-
   assert.equal(await player.play(), true);
-  assert.equal(player.snapshot().status, "starting");
-  assert.equal(player.snapshot().playingIndex, 0);
-  assert.equal(await player.play(), true);
-  assert.equal(playCalls, 1, "a second click must not enqueue the utterance twice");
-  callbacks.onStart();
-  assert.equal(player.snapshot().status, "playing");
-  callbacks.onError(new Error("voice did not start"));
-  assert.equal(player.snapshot().status, "error");
-  assert.match(player.snapshot().message, /voice did not start/);
-});
-
-test("system speech uses the same queue controls without creating a fake WAV download", async () => {
-  const voiceId = "system:Microsoft%20Sabina%00es-MX";
-  const utterances = [];
-  let cancelCount = 0;
-  let currentSpeech = false;
-  const speech = {
-    play(result, callbacks) {
-      const utterance = { result, callbacks, rate: callbacks.rate };
-      utterances.push(utterance);
-      currentSpeech = true;
-      callbacks.onStart();
-    },
-    pause() { utterances.at(-1)?.callbacks.onPause(); return true; },
-    resume() { utterances.at(-1)?.callbacks.onResume(); return true; },
-    cancel() { if (!currentSpeech) return false; currentSpeech = false; cancelCount++; return true; }
-  };
-  const { audio, player, synthCalls } = makePlayer({
-    speech,
-    getVoice: () => voiceId,
-    synthesize: async (text, options) => {
-      synthCalls.push({ text, options });
-      return { kind: "system-speech", provider: "speechSynthesis", voiceId, text };
-    }
-  });
-  player.setChunks(["Hola.", "¿Cómo estás?"]);
-
-  assert.equal(await player.play(), true);
-  assert.equal(player.snapshot().status, "playing");
-  assert.equal(player.snapshot().activeProvider, "speechSynthesis");
-  assert.equal(player.snapshot().hasDownloadableAudio, false);
-  assert.equal(player.snapshot().downloadUrl, null);
-  assert.equal(audio.playCount, 0);
-  assert.equal(utterances.length, 1);
-  assert.equal(utterances[0].result.text, "Hola.");
-  player.state.durations = [8, 12];
-  utterances[0].callbacks.onBoundary({ charIndex: 2, charLength: 5 });
-  assert.equal(player.snapshot().fragmentProgress, 0.4);
-  assert.equal(player.snapshot().totalProgress, 0.2, "system speech progress must stay text-based even if old WAV durations exist");
-
-  assert.equal(player.pause(), true);
-  assert.equal(player.snapshot().status, "paused");
-  assert.equal(await player.play(), true);
-  assert.equal(utterances.length, 1, "resume should reuse the active utterance");
-
-  assert.equal(player.setSpeed(1.5), true);
-  assert.equal(cancelCount, 1);
-  assert.equal(utterances.length, 2, "changing speed restarts the current utterance at the new rate");
-  assert.equal(utterances[1].rate, 1.5);
-  currentSpeech = false;
-  utterances[1].callbacks.onEnd();
-  await waitFor(() => player.snapshot().selectedIndex === 1 && player.snapshot().status === "playing");
-  assert.equal(utterances[2].result.text, "¿Cómo estás?");
-  assert.equal(synthCalls.length, 2);
-
-  player.stop();
-  assert.equal(cancelCount, 2);
-  assert.equal(player.snapshot().status, "stopped");
-  assert.equal(player.snapshot().downloadUrl, null);
+  await waitFor(() => player.snapshot().status === "playing");
+  assert.equal(player.snapshot().activeProvider, "piper");
+  assert.equal(player.snapshot().hasDownloadableAudio, true);
+  assert.equal(player.snapshot().downloadFilename, "lectura-fragmento-01.wav");
+  assert.equal(audio.playCount, 1);
+  assert.equal(player.seek(3), true);
+  assert.equal(audio.currentTime, 3);
+  audio.finish();
+  await waitFor(() => player.snapshot().status === "completed");
+  assert.equal(player.snapshot().activeProvider, "piper");
 });

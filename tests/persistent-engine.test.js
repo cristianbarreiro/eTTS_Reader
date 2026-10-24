@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PersistentReaderEngine } from "../src/persistent-engine.js";
-import { makeSystemVoiceId, systemVoiceRecord } from "../src/voice-catalog.js";
+import { PIPER_VOICE_CATALOG } from "../src/voice-catalog.js";
 
-function makeWavBlob() {
+function makeWavBlob(sampleRate = 24000) {
   const bytes = new Uint8Array(48);
   const view = new DataView(bytes.buffer);
   const write = (offset, value) => { for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index); };
   write(0, "RIFF"); view.setUint32(4, 40, true); write(8, "WAVE"); write(12, "fmt ");
   view.setUint32(16, 16, true); view.setUint16(20, 3, true); view.setUint16(22, 1, true);
-  view.setUint32(24, 24000, true); view.setUint32(28, 96000, true); view.setUint16(32, 4, true); view.setUint16(34, 32, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 4, true); view.setUint16(32, 4, true); view.setUint16(34, 32, true);
   write(36, "data"); view.setUint32(40, 4, true); view.setFloat32(44, 0.5, true);
   return new Blob([bytes], { type: "audio/wav" });
 }
@@ -244,50 +244,38 @@ test("explicit audio-cache deletion clears persisted references without stopping
   assert.equal(repository.audio.size, 0);
 });
 
-test("system-voice sessions bypass WAV caching and persist their provider without changing other sessions", async () => {
+test("Piper generates and caches local WAVs by pinned voice/model and switching voice clears stale keys", async () => {
   const repository = new MemoryRepository();
-  const platformVoice = { name: "Microsoft Sabina", lang: "es-MX", voiceURI: "urn:voice:sabina" };
-  const voice = systemVoiceRecord(platformVoice);
-  const played = [];
-  const inferenceCalls = [];
+  const voice = PIPER_VOICE_CATALOG[0];
+  const secondVoice = PIPER_VOICE_CATALOG[1];
+  const synthCalls = [];
   const inference = {
-    async initialize(_progress, voiceId) { inferenceCalls.push(voiceId); return { provider: "speechSynthesis" }; },
-    async listSystemVoices() { return [voice]; },
-    async synthesize(text, voiceId) { return { kind: "system-speech", provider: "speechSynthesis", voiceId, text }; },
+    async initialize(_progress, voiceId) { return { provider: "piper", voiceId, ready: true }; },
+    async synthesize(text, voiceId) { synthCalls.push({ text, voiceId }); return makeWavBlob(22050); },
     async dispose() {}
   };
-  const speech = {
-    play(result, callbacks) { played.push(result); callbacks.onStart(); },
-    pause() { return true; },
-    resume() { return true; },
-    cancel() {}
-  };
-  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference, speech });
-  const spanishSession = {
-    ...session(),
-    voice: voice.id,
-    voiceId: voice.id,
-    voiceProvider: "speechSynthesis",
-    audioKeys: ["old-kokoro-wav-key"]
-  };
-  const otherSession = { ...session(), id: "session-other", voice: "af_heart", voiceProvider: "kokoro" };
-  repository.sessions.set(otherSession.id, otherSession);
+  const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference });
+  const piperSession = { ...session(), voice: voice.id, voiceId: voice.id, voiceProvider: "piper", audioKeys: [] };
+  repository.sessions.set("session-other", { ...session(), id: "session-other", voice: "af_heart", voiceProvider: "kokoro" });
 
-  const init = await engine.handleCommand({ command: "initialize", voice: voice.id });
-  assert.equal(init.result.provider, "speechSynthesis");
-  assert.deepEqual(inferenceCalls, [voice.id]);
+  const initialized = await engine.handleCommand({ command: "initialize", voice: voice.id });
+  assert.equal(initialized.result.provider, "piper");
+  assert.equal(initialized.result.voiceId, voice.id);
+  const started = await engine.handleCommand({ command: "start", session: piperSession });
+  await waitFor(() => repository.audio.size === 2, "both Piper WAV fragments should be cached");
+  assert.equal(started.snapshot.activeProvider, "piper");
+  assert.match(started.currentAudioKey, /^piper-v1-/);
+  assert.deepEqual(synthCalls.map(({ voiceId }) => voiceId), [voice.id, voice.id]);
+  const cached = [...repository.audio.values()];
+  assert.ok(cached.every((record) => record.provider === "piper"));
+  assert.ok(cached.every((record) => record.modelRevision === voice.modelRevision));
+  assert.ok(cached.every((record) => record.sampleRate === 22050));
+  assert.ok(cached.every((record) => record.blob.type === "audio/wav"));
 
-  const started = await engine.handleCommand({ command: "start", session: spanishSession });
-  assert.equal(started.snapshot.activeProvider, "speechSynthesis");
-  assert.equal(started.currentAudioKey, null);
-  assert.equal(engine.activeSession.voiceProvider, "speechSynthesis");
-  assert.equal(engine.activeSession.audioKeys[0], null);
-  assert.equal(repository.audio.size, 0);
-  assert.equal(played[0].text, "First.");
-
-  await engine.handleCommand({ command: "voice", value: voice.id });
-  assert.equal(repository.sessions.get("session-a").voiceId, voice.id);
-  assert.equal(repository.sessions.get("session-a").voiceProvider, "speechSynthesis");
+  await engine.handleCommand({ command: "stop" });
+  await engine.handleCommand({ command: "voice", value: secondVoice.id });
+  assert.equal(repository.sessions.get("session-a").voice, secondVoice.id);
+  assert.equal(repository.sessions.get("session-a").voiceProvider, "piper");
+  assert.deepEqual(repository.sessions.get("session-a").audioKeys, [null, null]);
   assert.equal(repository.sessions.get("session-other").voice, "af_heart");
-  assert.equal(repository.sessions.get("session-other").voiceProvider, "kokoro");
 });

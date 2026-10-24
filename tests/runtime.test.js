@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveKokoroAssetUrls, verifyWasmAssets } from "../src/onnx-assets.js";
-import { attemptInitialization, deriveReaderControls } from "../src/reader-state.js";
+import { attemptInitialization, deriveReaderControls, prepareAndRunVoiceTest } from "../src/reader-state.js";
 
 const rootInstall = resolveKokoroAssetUrls("chrome-extension://abc/dist/assets/popup.js");
 const distInstall = resolveKokoroAssetUrls("chrome-extension://abc/assets/popup.js");
@@ -92,16 +92,70 @@ test("cached model files do not count as an initialized engine", () => {
   assert.equal(deriveReaderControls("error", 1, true).canPause, true, "an active player remains pausable after a model error");
 });
 
-test("a listed system voice can play and pause without initializing Kokoro", () => {
-  const system = deriveReaderControls("idle", 1, false, { provider: "speechSynthesis", systemVoiceAvailable: true });
-  assert.equal(system.canInitialize, false);
-  assert.equal(system.canPlay, true);
-  assert.equal(system.canTestVoice, true);
-  assert.equal(system.canPause, false);
+test("Piper controls require an installed and initialized engine unless a WAV is already cached", () => {
+  for (const state of ["checking", "idle", "loading", "error"]) {
+    const controls = deriveReaderControls(state, 1, false, { provider: "piper" });
+    assert.equal(controls.canPlay, false, `${state} Piper must not start as if it were ready`);
+    assert.equal(controls.canTestVoice, false);
+  }
+  const cached = deriveReaderControls("cached", 1, false, { provider: "piper" });
+  assert.equal(cached.canPlay, false, "a downloaded model still needs initialization");
+  assert.equal(cached.canRequestVoiceTest, false, "lazy test is only enabled when the UI confirms the model is installed");
+  assert.equal(cached.canInitialize, true);
+  const cachedInstalled = deriveReaderControls("cached", 1, false, { provider: "piper", allowLazyVoiceTest: true });
+  assert.equal(cachedInstalled.canPlay, false, "model download alone must not enable document playback");
+  assert.equal(cachedInstalled.canTestVoice, false, "the Piper engine is not marked ready before initialization");
+  assert.equal(cachedInstalled.canRequestVoiceTest, true, "an installed model can be initialized by the test action");
+  assert.equal(deriveReaderControls("error", 1, false, { provider: "piper", allowLazyVoiceTest: true }).canRequestVoiceTest, false);
+  const ready = deriveReaderControls("ready", 1, false, { provider: "piper" });
+  assert.equal(ready.canPlay, true);
+  assert.equal(ready.canTestVoice, true);
+  assert.equal(ready.canRequestVoiceTest, true);
+  const cachedAudio = deriveReaderControls("error", 1, false, { provider: "piper", audioAvailable: true });
+  assert.equal(cachedAudio.canPlay, true, "an existing WAV remains playable after a model error");
+});
 
-  const missing = deriveReaderControls("ready", 1, false, { provider: "speechSynthesis", systemVoiceAvailable: false });
-  assert.equal(missing.canPlay, false);
-  assert.equal(missing.canTestVoice, false);
+test("English Kokoro voice tests can prepare an idle or cached model on demand", () => {
+  for (const state of ["idle", "cached"]) {
+    const controls = deriveReaderControls(state, 0, false, { provider: "kokoro", allowLazyVoiceTest: true });
+    assert.equal(controls.canRequestVoiceTest, true, `${state} Kokoro can be prepared by an explicit voice-test click`);
+    assert.equal(controls.canTestVoice, false, "Kokoro is not reported ready before initialization");
+  }
+  for (const state of ["loading", "error"]) {
+    assert.equal(deriveReaderControls(state, 0, false, { provider: "kokoro", allowLazyVoiceTest: true }).canRequestVoiceTest, false);
+  }
+});
+
+test("Probar voz prepares Kokoro or downloaded Piper before requesting a sample", async () => {
+  const calls = [];
+  const completed = await prepareAndRunVoiceTest({
+    provider: "kokoro",
+    modelState: "idle",
+    initialize: async () => { calls.push("initialize"); return true; },
+    runTest: async () => calls.push("preview")
+  });
+  assert.equal(completed, true);
+  assert.deepEqual(calls, ["initialize", "preview"]);
+
+  calls.length = 0;
+  const piperCompleted = await prepareAndRunVoiceTest({
+    provider: "piper",
+    modelState: "cached",
+    initialize: async () => { calls.push("initialize"); return true; },
+    runTest: async () => calls.push("preview")
+  });
+  assert.equal(piperCompleted, true);
+  assert.deepEqual(calls, ["initialize", "preview"]);
+
+  calls.length = 0;
+  const failed = await prepareAndRunVoiceTest({
+    provider: "piper",
+    modelState: "cached",
+    initialize: async () => { calls.push("initialize"); return false; },
+    runTest: async () => calls.push("preview")
+  });
+  assert.equal(failed, false);
+  assert.deepEqual(calls, ["initialize"], "a failed engine preparation must not start synthesis");
 });
 
 test("failed model initialization enters error state and can be retried", async () => {

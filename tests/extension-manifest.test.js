@@ -8,6 +8,10 @@ const builtSource = new URL("../public/manifest.json", import.meta.url);
 test("source and production manifests use one Side Panel, an event worker, and minimal extension API permissions", async () => {
   const root = JSON.parse(await readFile(source, "utf8"));
   const built = JSON.parse(await readFile(builtSource, "utf8"));
+  for (const manifest of [root, built]) {
+    assert.match(manifest.description, /Kokoro.*Piper/);
+    assert.doesNotMatch(manifest.description, /Edge\/Windows|SpeechSynthesis/i);
+  }
   for (const [manifest, panelPath, workerPath] of [[root, "dist/sidepanel.html", "dist/background.js"], [built, "sidepanel.html", "background.js"]]) {
     assert.equal(manifest.manifest_version, 3);
     assert.equal(manifest.side_panel.default_path, panelPath);

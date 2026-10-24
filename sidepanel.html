@@ -24,7 +24,7 @@
 
     <section class="card input-card" aria-labelledby="content-heading">
       <div class="section-heading">
-        <div><p class="section-kicker">TU LECTURA</p><h2 id="content-heading">Contenido</h2></div>
+        <h2 id="content-heading">Contenido</h2>
         <span id="count" class="character-count">0 caracteres</span>
       </div>
       <label class="dropzone" id="dropzone" for="document-file">
@@ -37,7 +37,7 @@
 
       <label class="sr-only" for="text-input">Pega o edita aquí el texto que quieres escuchar</label>
       <textarea id="text-input" maxlength="200000" placeholder="Pega o escribe aquí el texto que quieres escuchar…"></textarea>
-      <div class="text-actions"><span id="chunk-count" class="hint">0 fragmentos</span><button id="load-player" class="secondary-button load-player-button" type="button" disabled>Cargar al reproductor</button><button id="clear-text" class="text-button">Vaciar editor</button></div>
+      <div class="text-actions"><span id="chunk-count" class="hint">0 fragmentos</span><div class="text-action-buttons"><button id="load-player" class="secondary-button load-player-button" type="button" disabled>Cargar al reproductor</button><button id="clear-text" class="text-button">Vaciar editor</button></div></div>
       <p id="queue-sync-status" class="queue-sync-status" role="status" aria-live="polite">Escribe o importa texto y cárgalo cuando quieras preparar la cola.</p>
     </section>
 
@@ -120,24 +120,24 @@
               <option value="af_heart">English · Heart · femenina</option>
               <option value="am_michael">English · Michael · masculina</option>
             </optgroup>
-            <optgroup id="system-voice-options" label="Español · voces de Edge/Windows">
-              <option value="system-voices-loading" disabled>Buscando voces del sistema…</option>
+            <optgroup label="Piper · español local">
+              <option value="piper:es_AR-daniela-high" selected>Español · Daniela · Argentina · alta (114 MB)</option>
+              <option value="piper:es_ES-davefx-medium">Español · DaveFX · España · media (63 MB)</option>
             </optgroup>
           </select>
         </div>
         <div class="voice-row speed-row"><label for="speed">Velocidad</label><select id="speed" aria-label="Velocidad de reproducción"><option value="0.75">0,75×</option><option value="1" selected>1,0×</option><option value="1.25">1,25×</option><option value="1.5">1,5×</option><option value="1.75">1,75×</option><option value="2">2,0×</option></select></div>
         <button id="test-voice" class="secondary-button test-voice" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 12 7-12 7z" /></svg>Probar voz</button>
       </div>
-      <p id="voice-note" class="voice-note">Kokoro local genera WAV con Heart y Michael. Las voces españolas aparecen si Edge/Windows ofrece alguna.</p>
-      <button id="refresh-system-voices" class="text-button refresh-voices" type="button">Actualizar voces de Edge/Windows</button>
-      <p id="privacy-note" class="privacy-note">Con Kokoro, la síntesis se procesa localmente. Las voces del sistema pueden usar servicios de Edge/Windows.</p>
+      <p id="voice-note" class="voice-note">Kokoro genera WAV inglés localmente; Piper genera WAV en español tras descargar el modelo elegido.</p>
+      <p id="privacy-note" class="privacy-note">Las voces locales sintetizan el texto en este dispositivo. La conexión solo se usa para descargar los modelos solicitados.</p>
       <details id="model-management" class="model-management">
         <summary>Modelo y almacenamiento</summary>
         <div class="model-management-content">
           <div class="model-actions"><button id="install-model" class="primary-button">Preparar Kokoro local</button></div>
           <progress id="download-progress" max="100" value="0" hidden aria-label="Progreso de descarga del modelo"></progress>
           <p id="model-status" class="status-line" role="status" aria-live="polite">El modelo se prepara solo cuando lo solicitas.</p>
-          <div class="storage-row"><span id="storage-usage" class="hint">Uso local: calculando…</span><button id="delete-audio-cache" class="text-button danger-text">Eliminar audios guardados</button><button id="delete-model" class="text-button danger-text">Eliminar modelo local</button></div>
+          <div class="storage-row"><span id="storage-usage" class="hint">Uso local: calculando…</span><button id="delete-audio-cache" class="text-button danger-text">Eliminar audios guardados</button><button id="delete-model" class="text-button danger-text">Eliminar modelo Kokoro</button><button id="delete-piper-model" class="text-button danger-text" hidden>Eliminar modelo Piper seleccionado</button></div>
         </div>
       </details>
     </section>

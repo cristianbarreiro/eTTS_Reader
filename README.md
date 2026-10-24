@@ -1,6 +1,6 @@
 # Lector local para Edge
 
-Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en WASM/CPU. La experiencia principal vive en el Side Panel de Edge, no en un popup que se destruye al perder el foco.
+Extensión Manifest V3 para leer texto y documentos con Kokoro TTS en inglés y Piper TTS en español, ambos locales y ejecutados en WASM/CPU. La experiencia principal vive en el Side Panel de Edge, no en un popup que se destruye al perder el foco.
 
 ## Arquitectura
 
@@ -8,6 +8,8 @@ Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en
 - `src/background.js`: captura la pestaña invocadora antes de abrir el Side Panel, sigue los cambios de pestaña mediante eventos cuando el usuario lo activa, valida que el documento de origen siga siendo el mismo, crea el menú contextual de selección y enruta mensajes. También administra el contexto offscreen; no mantiene el worker vivo con bucles.
 - `offscreen.html` y `src/offscreen.js`: única autoridad de reproducción y cola activa. Puede mantener audio y preparar un fragmento siguiente mientras el panel está oculto.
 - `src/tts-worker.js`: ejecuta Kokoro fuera de la interfaz. Se crea solo al descargar/preparar el modelo o al iniciar una lectura.
+- `src/piper-worker-client.js`, `src/piper-tts-worker.js` y `src/piper-tts.js`: instalan modelos Piper oficiales, verifican tamaño/SHA-256 y ejecutan la fonemización y el modelo ONNX local en un Worker dedicado.
+- `src/piper-model-store.js`: conserva los modelos Piper en OPFS, por voz y revisión, sin borrarlos al actualizar la extensión.
 - `src/persistence.js`: IndexedDB para documentos, sesiones y WAV generados. El esquema se amplía con migraciones aditivas; nunca vacía las tiendas durante una actualización.
 - `src/reader-client.js`: reconecta la interfaz a una sesión que ya se está reproduciendo, sin iniciar un segundo reproductor.
 - `src/documents.js`: TXT y Markdown se leen directamente; PDF.js y Mammoth se importan dinámicamente cuando se solicita ese formato.
@@ -18,11 +20,11 @@ Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en
 
 - La **Biblioteca local** muestra una sola entrada por documento y adjunta sus sesiones en los detalles. Las sesiones conservan texto recuperable, fragmento, posición, voz, velocidad, estado y audios asociados. Las lecturas sin documento original siguen apareciendo como recuperables. La biblioteca se carga al desplegar la sección y no lee los blobs WAV.
 - El texto pegado o extraído se guarda en IndexedDB con un debounce breve solo si contiene caracteres distintos de espacios. Vaciar el editor deja un borrador en memoria: no crea documentos ni sobrescribe el contenido guardado. La edición válida actualiza el mismo documento; importar un archivo o confirmar una importación de pestaña crea un documento nuevo.
-- Cada WAV se guarda una vez por hash de texto, voz y versión del modelo. Se reutiliza en lecturas siguientes y se precarga como máximo un fragmento siguiente.
+- Cada WAV se guarda una vez por hash de texto, voz, modelo y runtime. Se reutiliza en lecturas siguientes y se precarga como máximo un fragmento siguiente.
 - Voz, velocidad e identificadores recientes usan `chrome.storage.local`; el texto, las sesiones y los WAV grandes no.
 - Cerrar u ocultar el panel no elimina nada. Al reabrir, una reproducción activa se reconecta; si Edge ya terminó el contexto, la interfaz muestra una sesión interrumpida y espera a que el usuario la reanude. Nunca se reanuda audio inesperadamente.
 - **Vaciar editor** crea un borrador no persistido y conserva los anteriores. `Abrir` carga el texto sin iniciar audio; `Reanudar` recupera una sesión y continúa la lectura; `Leer` inicia una sesión para el texto del documento. Cada documento y sesión tiene una acción `X` con confirmación. Borrar un documento desvincula sus sesiones, que conservan su copia de texto, progreso y audio; al abrirlas se recupera el documento. Borrar una sesión elimina su progreso y solo los WAV que ninguna otra sesión use. Los registros antiguos de documentos vacíos se limpian de forma idempotente al iniciar; sus sesiones se desvinculan y sus datos y audios permanecen. Borrar documentos o sesiones nunca borra el modelo. **Eliminar audios guardados** mantiene documentos y sesiones. **Eliminar modelo local** elimina solo las cachés del modelo y las voces.
-- El panel muestra el consumo de almacenamiento disponible mediante `navigator.storage.estimate()`. Si IndexedDB o la cuota fallan, se informa del error; no se purgan datos automáticamente.
+- El panel muestra el consumo de almacenamiento disponible mediante `navigator.storage.estimate()`, incluidos los modelos Piper guardados en OPFS. Si IndexedDB u OPFS fallan, se informa del error; no se purgan datos automáticamente.
 
 ## Importar una pestaña de Edge
 
@@ -50,12 +52,13 @@ Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en
 
 ## Modelo y privacidad
 
-- Kokoro (`kokoro-js` 1.2.1), Transformers.js y ONNX Runtime Web se ejecutan localmente en WASM/CPU; no se requiere WebGPU ni un proveedor de voz remoto.
-- El runtime WASM y dos embeddings están empaquetados. Los pesos del modelo se obtienen de Hugging Face solo al pedir su preparación o comenzar una lectura que los necesite. Una vez almacenados, pueden reutilizarse sin volver a descargarlos.
-- Con Kokoro, el texto se sintetiza localmente y la red solo se usa para descargar los pesos que solicita el usuario. Si se selecciona una voz de Edge/Windows, la extensión entrega el texto a `SpeechSynthesis`; el sistema operativo puede usar servicios propios. Usa Kokoro cuando necesites que la síntesis de voz permanezca local.
+- Kokoro (`kokoro-js` 1.2.1), Transformers.js, Piper, el fonemizador eSpeak y dos versiones aisladas de ONNX Runtime Web se ejecutan en Workers locales con WASM/CPU. No se requiere WebGPU ni un proveedor de voz remoto.
+- Los runtimes WASM, el fonemizador y dos embeddings están empaquetados. Los modelos de Kokoro y Piper se descargan únicamente cuando el usuario pulsa la acción de preparación/descarga; los modelos Piper se guardan en OPFS y se verifican por tamaño y SHA-256.
+- El texto se sintetiza localmente. La red solo se usa para descargar los pesos del modelo que el usuario solicita; no se envía el texto a un servicio remoto.
 - PDF, DOCX, TXT y Markdown de hasta 25 MB se procesan en el dispositivo. PDF.js no hace OCR; los escaneos sin capa de texto se informan.
-- Kokoro sigue ofreciendo `af_heart` y `am_michael` (inglés) con síntesis local y WAV descargable. Si Edge/Windows expone voces españolas a `SpeechSynthesis`, aparecen con el nombre real del sistema y se reproducen en la misma cola. No se infiere el género de esas voces ni se descarga un modelo español.
-- Las voces de Edge/Windows son administradas por el sistema: su disponibilidad y privacidad dependen de la instalación y configuración de Edge/Windows. No garantizan funcionamiento sin conexión, no producen WAV descargable y no ofrecen duración ni búsqueda temporal exactas. Kokoro sigue siendo el proveedor local neuronal de esta versión. La decisión de proveedores y licencias está en [`docs/VOICE-PROVIDERS.md`](docs/VOICE-PROVIDERS.md).
+- Kokoro ofrece `af_heart` y `am_michael` en inglés. Piper ofrece Daniela (`es_AR`, alta) y DaveFX (`es_ES`, media), con WAV descargable y controles de reproducción habituales. Las voces, revisiones, pesos y licencias de datos se documentan en [`docs/VOICE-PROVIDERS.md`](docs/VOICE-PROVIDERS.md).
+- Las sesiones que guardaban una voz de Edge/Windows migran a Daniela sin autoplay; se conservan texto y progreso, y se invalidan solo las claves de audio de aquel proveedor.
+- Los avisos de componentes y voces de terceros están en [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 - Se genera y descarga el WAV del fragmento actual; todavía no se ofrece exportación de un documento completo como un único WAV.
 
 ## Instalación y desarrollo
@@ -65,22 +68,23 @@ Extensión Manifest V3 para leer texto y documentos localmente con Kokoro TTS en
 3. Ejecuta `npm run build`.
 4. Abre `edge://extensions`, activa **Modo de desarrollador** y elige **Cargar desempaquetado**.
 5. Selecciona `dist`.
-6. Pulsa el icono de la extensión para abrir el Side Panel. Prepara el modelo local cuando quieras; abrir el panel no inicializa Kokoro ni descarga pesos.
+6. Pulsa el icono de la extensión para abrir el Side Panel. Elige **Descargar voz** para obtener el modelo Piper seleccionado o prepara Kokoro cuando quieras; abrir el panel no inicializa motores ni descarga pesos.
 
 Para actualizar, vuelve a compilar y pulsa **Recargar** en `edge://extensions`.
 
 ## Validación
 
-`npm test` cubre segmentación, reproducción simulada, reanudación, persistencia IndexedDB (con un adaptador de prueba), rechazo de documentos vacíos, limpieza de documentos vacíos históricos con sesiones/audios conservados, borrador vacío no persistido, agrupación de sesiones bajo una entrada documental, recuperación sin autoplay, caché de audio, permisos mínimos y opcionales, seguimiento simulado entre pestañas, navegación y cierre, solicitud específica de origen, descarte de resultados obsoletos, menú de selección, extracción DOM simulada (incluida salida parcial de Google Docs), borrado con sesiones recuperables, limpieza de audios compartidos, catálogo y controles simulados de SpeechSynthesis y descarga de PDF remotos/locales con límites, firma, permiso y fallos de lectura. Estas pruebas no sustituyen una prueba real en Edge ni comprueban que Windows tenga voces españolas instaladas.
+`npm test` cubre segmentación, reproducción simulada, reanudación, persistencia IndexedDB, migración de sesiones, cachés separadas por voz/modelo, catálogo Piper/Kokoro, preparación y errores, carga OPFS simulada y extracción/importación de documentos. Estas pruebas no sustituyen una prueba real en Edge ni validan el audio audible con los modelos completos.
 
-Prueba manual pendiente en Edge: carga `dist` como extensión desempaquetada; activa **Seguir pestaña activa** y concede `tabs`; cambia entre dos páginas y navega dentro de una pestaña manteniendo el Side Panel abierto; confirma que el título y el origen se actualizan sin iniciar extracción ni interrumpir la reproducción; importa una página y rechaza el permiso de sitio para verificar el mensaje de recuperación; comprueba que una navegación durante la extracción descarta la vista previa. Después abre un PDF local con permiso de archivos desactivado y confirma que solo aparecen el aviso y las opciones de recuperación; activa el permiso en `edge://extensions` y vuelve a comprobar; verifica que un PDF con texto produce una vista previa y que cancelar deja intacto el documento/sesión; confirma Reemplazar/Añadir; y repite seleccionando manualmente el archivo cuando la lectura automática no esté disponible. Para un PDF escaneado, la extensión debe avisar que no hay texto extraíble y no afirmar que hizo OCR.
+Prueba manual del motor: carga `dist` en Edge; descarga e inicializa cada modelo Piper, prueba una muestra, genera/reproduce/descarga WAV, reinicia el panel para comprobar el almacenamiento local y simula ausencia de red/recurso para verificar el estado de error y reintento. La síntesis audible debe probarse en Edge: el build y las pruebas unitarias por sí solos no la demuestran.
 
 El proyecto no define scripts de lint ni de comprobación de tipos. `node --check` se puede usar para revisar sintaxis JavaScript; `npm run build` valida el empaquetado de producción.
 
 ## Dependencias y licencias
 
 - `kokoro-js` y el modelo ONNX de Kokoro: revisar licencias y condiciones de redistribución antes de publicar pesos.
-- `@huggingface/transformers` y ONNX Runtime Web: Apache-2.0.
+- `@huggingface/transformers`: Apache-2.0; `onnxruntime-web`: MIT.
+- `@diffusionstudio/piper-wasm` declara MIT, pero su artefacto empaquetado incorpora eSpeak NG, cuyo upstream declara GPL-3.0-or-later. Revisa los avisos y obligaciones aplicables antes de redistribuir.
 - `pdfjs-dist`: Apache-2.0.
 - `mammoth`: BSD-2-Clause.
 

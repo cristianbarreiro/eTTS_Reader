@@ -718,7 +718,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const result = await sendOffscreen("close-idle", {}, { create: false });
       return result;
     }
-    const needsContext = ["start", "preview", "initialize", "restore"].includes(message.command);
+    const needsContext = [
+      "start", "preview", "initialize", "restore", "piper-catalog", "piper-model-status",
+      "list-installed-piper-models", "install-piper-model", "delete-piper-model"
+    ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };
   void run().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "Falló la coordinación del lector." }));

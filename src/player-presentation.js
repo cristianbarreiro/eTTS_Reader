@@ -15,7 +15,6 @@ export function playerHeaderState(status) {
 }
 
 export function readingDurationSummary(snapshot, activeProvider = snapshot.activeProvider) {
-  if (activeProvider === "speechSynthesis") return "La duración y la búsqueda temporal no están disponibles para voces del sistema.";
   if (snapshot.activeKind === "preview") return `Duración de la muestra ${formatTime(snapshot.duration)}`;
   if (Number.isFinite(snapshot.totalDuration)) return `Duración total ${formatTime(snapshot.totalDuration)} · ${snapshot.knownDurationCount} fragmentos medidos`;
   const durations = Array.isArray(snapshot.durations) ? snapshot.durations : [];
@@ -33,7 +32,6 @@ export function readingProgressCaption(snapshot) {
 
   const progress = Number.isFinite(snapshot.totalProgress) ? snapshot.totalProgress : 0;
   const percent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
-  if (snapshot.activeProvider === "speechSynthesis") return `Aprox. ${percent}% por texto`;
   if (Number.isFinite(snapshot.totalDuration)) return `Tiempo total · ${percent}%`;
   return `Aprox. ${percent}% por fragmentos`;
 }
