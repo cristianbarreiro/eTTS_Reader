@@ -77,6 +77,7 @@ function makeEngine(repository, synthCalls = [], publish = () => {}) {
       await delay();
       return makeWavBlob();
     },
+    preparationStatus(voiceId) { return { state: voiceId.startsWith("piper:") ? "cached" : "ready" }; },
     async initialize() { return { voices: ["af_heart", "am_michael"] }; },
     async dispose() {}
   };
@@ -87,6 +88,22 @@ const session = () => ({
   id: "session-a", documentId: "document-a", sourceText: "First. Second.",
   chunks: ["First.", "Second."], selectedIndex: 0, position: 0,
   status: "text-ready", voice: "af_heart", speed: 1, audioKeys: []
+});
+
+test("voice preparation status reports the selected provider without starting playback or synthesis", async () => {
+  const repository = new MemoryRepository();
+  const synthCalls = [];
+  const { engine } = makeEngine(repository, synthCalls);
+
+  assert.deepEqual(await engine.handleCommand({ command: "voice-preparation-status", voiceId: "af_heart" }), {
+    ok: true, voiceId: "af_heart", provider: "kokoro", state: "ready"
+  });
+  assert.deepEqual(await engine.handleCommand({ command: "voice-preparation-status", voiceId: PIPER_VOICE_CATALOG[0].id }), {
+    ok: true, voiceId: PIPER_VOICE_CATALOG[0].id, provider: "piper", state: "cached"
+  });
+  assert.equal(synthCalls.length, 0);
+  assert.equal(repository.sessions.size, 0);
+  assert.equal(engine.player.snapshot().status, "empty");
 });
 
 test("offscreen engine prebuffers one next chunk and advances without a connected panel", async () => {

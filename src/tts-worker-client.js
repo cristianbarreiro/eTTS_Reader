@@ -5,6 +5,7 @@ export class KokoroWorkerClient {
     this.pending = new Map();
     this.sequence = 0;
     this.initialization = null;
+    this.state = "idle";
   }
 
   _ensureWorker() {
@@ -27,6 +28,7 @@ export class KokoroWorkerClient {
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
       this.initialization = null;
+      this.state = "error";
       worker.terminate();
       if (this.worker === worker) this.worker = null;
     };
@@ -45,13 +47,20 @@ export class KokoroWorkerClient {
 
   initialize(onProgress = () => {}) {
     if (!this.initialization) {
-      this.initialization = this._request("initialize", {}, onProgress).catch((error) => {
+      this.state = "loading";
+      this.initialization = this._request("initialize", {}, onProgress).then((result) => {
+        this.state = "ready";
+        return result;
+      }).catch((error) => {
         this.initialization = null;
+        this.state = "error";
         throw error;
       });
     }
     return this.initialization;
   }
+
+  preparationStatus() { return { provider: "kokoro", state: this.state }; }
 
   async synthesize(text, voice) {
     await this.initialize();
@@ -66,5 +75,6 @@ export class KokoroWorkerClient {
     for (const pending of this.pending.values()) pending.reject(new Error("Se cerró el contexto local de inferencia."));
     this.pending.clear();
     this.initialization = null;
+    this.state = "idle";
   }
 }

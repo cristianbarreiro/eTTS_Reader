@@ -303,6 +303,11 @@ export class PersistentReaderEngine {
       }
       case "piper-catalog": return { ok: true, voices: this.inference.piperCatalog() };
       case "piper-model-status": return { ok: true, ...(await this.inference.piperModelStatus(message.voiceId)) };
+      case "voice-preparation-status": {
+        const voice = getVoiceRecord(message.voiceId);
+        if (typeof this.inference.preparationStatus !== "function") throw new Error("El motor local no puede consultar el estado real de preparación de esta voz.");
+        return { ok: true, voiceId: voice.id, provider: voice.provider, ...(await this.inference.preparationStatus(voice.id)) };
+      }
       case "list-installed-piper-models": return { ok: true, voices: await this.inference.listInstalledPiperModels() };
       case "install-piper-model": {
         const voiceId = message.voiceId;

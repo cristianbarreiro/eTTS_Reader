@@ -6,6 +6,7 @@ test("router initializes and synthesizes through only the selected local provide
   const calls = [];
   const kokoro = {
     async initialize(progress) { calls.push(["kokoro:init", typeof progress]); return { voices: ["af_heart"] }; },
+    preparationStatus() { return { provider: "kokoro", state: "ready" }; },
     async synthesize(text, voice) { calls.push(["kokoro:synthesize", text, voice]); return new Blob(["kokoro wav"]); },
     async dispose() { calls.push(["kokoro:dispose"]); }
   };
@@ -17,6 +18,7 @@ test("router initializes and synthesizes through only the selected local provide
     async removeModel(voiceId) { return { voiceId, installed: false }; },
     catalog() { return [{ id: "piper:es_AR-daniela-high" }]; },
     async listInstalled() { return [{ voiceId: "piper:es_AR-daniela-high", installed: true }]; },
+    async preparationStatus(voiceId) { return { provider: "piper", voiceId, state: "ready", installed: true }; },
     async dispose() { calls.push(["piper:dispose"]); }
   };
   const router = new TTSProviderRouter({ kokoro, piper });
@@ -30,6 +32,8 @@ test("router initializes and synthesizes through only the selected local provide
   assert.deepEqual(await router.deletePiperModel("piper:es_AR-daniela-high"), { voiceId: "piper:es_AR-daniela-high", installed: false });
   assert.deepEqual(router.piperCatalog(), [{ id: "piper:es_AR-daniela-high" }]);
   assert.deepEqual(await router.listInstalledPiperModels(), [{ voiceId: "piper:es_AR-daniela-high", installed: true }]);
+  assert.deepEqual(await router.preparationStatus("af_heart"), { provider: "kokoro", state: "ready" });
+  assert.deepEqual(await router.preparationStatus("piper:es_AR-daniela-high"), { provider: "piper", voiceId: "piper:es_AR-daniela-high", state: "ready", installed: true });
   await router.dispose();
 
   assert.deepEqual(calls.slice(0, 4), [

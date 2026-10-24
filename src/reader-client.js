@@ -129,6 +129,7 @@ export class ReaderClient {
   initialize(voice = this.session?.voice || "af_heart") { return this.request("initialize", { voice }); }
   piperCatalog() { return this.request("piper-catalog"); }
   piperModelStatus(voiceId) { return this.request("piper-model-status", { voiceId }); }
+  voicePreparationStatus(voiceId) { return this.request("voice-preparation-status", { voiceId }); }
   listInstalledPiperModels() { return this.request("list-installed-piper-models"); }
   installPiperModel(voiceId) { return this.request("install-piper-model", { voiceId }); }
   deletePiperModel(voiceId) { return this.request("delete-piper-model", { voiceId }); }

@@ -25,6 +25,15 @@ export class TTSProviderRouter {
 
   piperCatalog() { return this.piper.catalog(); }
   piperModelStatus(voiceId) { getVoiceRecord(voiceId); return this.piper.modelStatus(voiceId); }
+  preparationStatus(voiceId) {
+    const provider = getVoiceProvider(voiceId);
+    if (provider === "kokoro") return this.kokoro.preparationStatus();
+    if (typeof this.piper.preparationStatus === "function") return this.piper.preparationStatus(voiceId);
+    return this.piper.listInstalled().then((voices) => {
+      const status = voices.find((voice) => voice.voiceId === voiceId);
+      return status || { provider, voiceId, state: "idle", installed: false };
+    });
+  }
   installPiperModel(voiceId, onProgress) { getVoiceRecord(voiceId); return this.piper.installModel(voiceId, onProgress); }
   deletePiperModel(voiceId) { getVoiceRecord(voiceId); return this.piper.removeModel(voiceId); }
   listInstalledPiperModels() { return this.piper.listInstalled(); }

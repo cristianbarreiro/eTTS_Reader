@@ -14,6 +14,12 @@ import { createTabFaviconPresenter, safeTabTitle } from "./tab-card-presentation
 import { playbackQueueMatchesEditor, preparePlaybackQueue } from "./playback-queue.js";
 import { createConfirmAction } from "./confirm-action.js";
 import {
+  createModelManagementDisclosure,
+  getVoicePreparationState,
+  MODEL_STATUS_CHECK_TIMEOUT_MS,
+  withBoundedWait
+} from "./model-management-disclosure.js";
+import {
   documentDeleteConfirmation,
   kokoroModelDeleteConfirmation,
   piperModelDeleteConfirmation,
@@ -47,7 +53,7 @@ const ui = {
   progress: $("#read-progress"), progressFill: $("#read-progress-fill"), progressCaption: $("#progress-caption"),
   elapsed: $("#elapsed"), duration: $("#duration"), durationSummary: $("#duration-summary"), seek: $("#seek"),
   downloadAudio: $("#download-audio"), clearText: $("#clear-text"), deleteAudioCache: $("#delete-audio-cache"), deleteModel: $("#delete-model"), deletePiperModel: $("#delete-piper-model"),
-  storageUsage: $("#storage-usage")
+  storageUsage: $("#storage-usage"), modelManagement: $("#model-management")
 };
 
 const confirmDestructiveAction = createConfirmAction({
@@ -63,10 +69,19 @@ const confirmDestructiveAction = createConfirmAction({
 
 const repository = new ReaderRepository();
 const presentTabFavicon = createTabFaviconPresenter(ui.activeTabFavicon, ui.activeTabFaviconFallback);
-let modelState = "idle";
+let modelState = "checking";
 let initializationPromise = null;
 const piperStates = new Map(PIPER_VOICE_CATALOG.map((voice) => [voice.id, { state: "checking", installed: false, modelSizeBytes: voice.modelSizeBytes }]));
 const piperInstallPromises = new Map();
+const modelManagementDisclosure = createModelManagementDisclosure({
+  details: ui.modelManagement,
+  getSelectedVoiceId: () => ui.voice.value,
+  getPreparationState: (voiceId) => getVoicePreparationState(voiceId, {
+    getVoiceProvider,
+    piperStates,
+    kokoroState: modelState
+  })
+});
 let currentDocument = null;
 let currentSession = null;
 let savedDocuments = [];
@@ -200,6 +215,15 @@ function updateQueueSyncUI(override = "") {
 function controlsModelState(voiceId = ui.voice.value) {
   return getVoiceProvider(voiceId) === "piper" ? piperStates.get(voiceId)?.state || "checking" : modelState;
 }
+
+function setKokoroModelState(nextState) {
+  const previousState = modelState;
+  modelState = nextState;
+  if (getVoiceProvider(ui.voice.value) === "kokoro") {
+    modelManagementDisclosure.onProviderStateChange(ui.voice.value, previousState, nextState);
+  }
+}
+
 function currentQueueMatchesEditor() {
   return playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value });
 }
@@ -251,12 +275,13 @@ function updateVoiceProviderUI() {
     ? "Esta sesión usaba una voz de Edge/Windows. Conservamos el texto y el progreso, y cambiamos su proveedor de forma segura; instala Piper para volver a generar audio."
     : "Kokoro local genera WAV descargable para Heart y Michael. «Probar voz» prepara el modelo la primera vez y reproduce una muestra.";
   ui.privacyNote.textContent = "Las voces locales sintetizan el texto en este dispositivo; solo se conecta a internet al descargar el modelo solicitado.";
-  ui.install.disabled = ["loading", "ready"].includes(modelState);
-  ui.install.textContent = ({ idle: "Preparar Kokoro local", cached: "Cargar modelo local", loading: "Preparando Kokoro…", ready: "Modelo preparado", error: "Reintentar carga local" })[modelState] || "Preparar Kokoro local";
+  ui.install.disabled = ["checking", "loading", "ready"].includes(modelState);
+  ui.install.textContent = ({ checking: "Comprobando Kokoro…", idle: "Preparar Kokoro local", cached: "Cargar modelo local", loading: "Preparando Kokoro…", ready: "Modelo preparado", error: "Reintentar carga local" })[modelState] || "Preparar Kokoro local";
 }
 
 function modelLabel() {
   return ({
+    checking: "Comprobando el motor local",
     idle: "Modelo sin descargar",
     cached: "Modelo guardado localmente",
     loading: "Cargando modelo local",
@@ -377,8 +402,13 @@ async function refreshDownloadLink(audioKey) {
 }
 
 function setPiperVoiceState(voiceId, patch) {
-  if (!piperStates.has(voiceId)) return;
-  piperStates.set(voiceId, { ...piperStates.get(voiceId), ...patch });
+  const previous = piperStates.get(voiceId);
+  if (!previous) return;
+  const next = { ...previous, ...patch };
+  piperStates.set(voiceId, next);
+  if (previous.state !== next.state) {
+    modelManagementDisclosure.onProviderStateChange(voiceId, previous.state, next.state);
+  }
 }
 
 function handleModelMessage(message) {
@@ -412,14 +442,14 @@ function handleModelMessage(message) {
     return;
   }
   if (message.state === "loading") {
-    modelState = "loading";
+    setKokoroModelState("loading");
     ui.modelStatus.textContent = message.message || "Kokoro se está cargando en el motor local.";
   } else if (message.state === "ready") {
-    modelState = "ready";
+    setKokoroModelState("ready");
     ui.modelStatus.textContent = message.message || "Motor Kokoro local listo.";
     ui.downloadProgress.hidden = true;
   } else if (message.state === "error") {
-    modelState = "error";
+    setKokoroModelState("error");
     ui.modelStatus.textContent = showError(message.message || "Kokoro no pudo iniciarse.", "model");
     ui.downloadProgress.hidden = true;
   }
@@ -437,10 +467,14 @@ function selectVoice(voiceId) {
 
 async function refreshPiperModelStates() {
   try {
-    const { voices = [] } = await player.listInstalledPiperModels();
+    const { voices = [] } = await withBoundedWait(
+      player.listInstalledPiperModels(),
+      MODEL_STATUS_CHECK_TIMEOUT_MS,
+      "La comprobación de los modelos Piper tardó demasiado. Puedes reintentar la preparación desde esta sección."
+    );
     for (const voice of voices) {
       setPiperVoiceState(voice.voiceId, {
-        state: voice.installed ? "cached" : "idle",
+        state: voice.state || (voice.reason ? "error" : voice.installed ? "cached" : "idle"),
         installed: Boolean(voice.installed),
         modelSizeBytes: voice.modelSizeBytes,
         error: voice.reason || ""
@@ -1075,17 +1109,27 @@ async function acceptTabImport(mode) {
 }
 
 async function refreshModelCacheState() {
+  let modelCached = false;
   try {
     const names = await caches.keys();
-    if (names.includes("edge-local-reader-kokoro-v1") && modelState === "idle") {
-      modelState = "cached";
-      ui.modelStatus.textContent = "Modelo local encontrado en caché; Kokoro se cargará cuando lo necesites.";
-      ui.install.textContent = "Preparar modelo local";
-      ui.engineState.textContent = modelLabel();
-      ui.engineState.dataset.state = modelState;
-    }
+    modelCached = names.includes("edge-local-reader-kokoro-v1");
   } catch {
     // Cache Storage may be unavailable in restricted profiles; the explicit load action can report it.
+  }
+
+  try {
+    const status = await withBoundedWait(
+      player.voicePreparationStatus("af_heart"),
+      MODEL_STATUS_CHECK_TIMEOUT_MS,
+      "La comprobación del estado de Kokoro tardó demasiado. Puedes reintentar la preparación desde esta sección."
+    );
+    const state = status.state === "idle" && modelCached ? "cached" : status.state || (modelCached ? "cached" : "idle");
+    setKokoroModelState(state);
+    if (state === "cached") ui.modelStatus.textContent = "Modelo local encontrado en caché; Kokoro se cargará cuando lo necesites.";
+    else if (state === "ready") ui.modelStatus.textContent = "Kokoro ya está preparado en el motor local.";
+  } catch (error) {
+    setKokoroModelState("error");
+    ui.modelStatus.textContent = showError(error, "model");
   }
   renderPlayer(player.snapshot());
 }
@@ -1165,7 +1209,7 @@ async function handleInstallAction() {
 async function initializeModel(voiceId = ui.voice.value) {
   if (getVoiceProvider(voiceId) !== "kokoro") return false;
   if (initializationPromise) return initializationPromise;
-  modelState = "loading";
+  setKokoroModelState("loading");
   ui.modelStatus.textContent = "Cargando Kokoro y sus recursos locales bajo demanda.";
   ui.downloadProgress.hidden = false;
   ui.downloadProgress.removeAttribute("value");
@@ -1176,12 +1220,12 @@ async function initializeModel(voiceId = ui.voice.value) {
     const result = await attemptInitialization(
       () => player.initialize(voiceId),
       (state) => {
-        if (state === "loading" || state === "error") modelState = state;
+        if (state === "loading" || state === "error") setKokoroModelState(state);
         updateVoiceProviderUI();
       }
     );
     if (!result.ok) throw result.error;
-    modelState = "ready";
+    setKokoroModelState("ready");
     await chrome.storage.local.set({ modelCached: true });
     ui.modelStatus.textContent = "Modelo Kokoro preparado. Los WAV ingleses se guardan y exportan desde este dispositivo.";
     ui.downloadProgress.hidden = true;
@@ -1189,7 +1233,7 @@ async function initializeModel(voiceId = ui.voice.value) {
     renderPlayer(player.snapshot());
     return true;
   })().catch((error) => {
-    modelState = "error";
+    setKokoroModelState("error");
     ui.modelStatus.textContent = showError(error, "model");
     ui.downloadProgress.hidden = true;
     updateVoiceProviderUI();
@@ -1262,6 +1306,7 @@ async function activateDocument(document, preferredSessionId = null, internal = 
     player.setSession(null);
   }
   updateTextInfo();
+  modelManagementDisclosure.onVoiceSelection(ui.voice.value);
   if (ui.library.open) await refreshLibrary();
   await refreshStorageUsage();
   } finally {
@@ -1333,6 +1378,7 @@ async function activateSession(session, internal = false, { skipFlush = false } 
     player.setSession(null);
   }
   updateTextInfo();
+  modelManagementDisclosure.onVoiceSelection(ui.voice.value);
   if (ui.library.open) await refreshLibrary();
   } finally {
     if (!internal) {
@@ -1639,6 +1685,7 @@ async function boot() {
   if (!currentDocument && preferredSession) {
     await activateSession(preferredSession);
     await refreshModelCacheState();
+    modelManagementDisclosure.onVoiceSelection(ui.voice.value);
     if (currentSession?.voiceMigrationNotice) ui.fileStatus.textContent = currentSession.voiceMigrationNotice;
     await refreshActiveTabContext();
     const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
@@ -1649,6 +1696,7 @@ async function boot() {
   if (!currentDocument) await createNewDraft();
   else await activateDocument(currentDocument, preferences.lastSessionId, false, { restoreSession: true });
   await refreshModelCacheState();
+  modelManagementDisclosure.onVoiceSelection(ui.voice.value);
   if (currentSession?.voiceMigrationNotice) ui.fileStatus.textContent = currentSession.voiceMigrationNotice;
   await refreshActiveTabContext();
   const pending = await chrome.runtime.sendMessage({ target: "background", command: "take-pending-selection" }).catch(() => null);
@@ -1849,6 +1897,7 @@ ui.voice.addEventListener("change", () => {
   void chrome.storage.local.set({ lastVoice: ui.voice.value });
   updateTextInfo();
   updateVoiceProviderUI();
+  modelManagementDisclosure.onVoiceSelection(ui.voice.value);
   renderPlayer(player.snapshot());
   queuePersistence(false);
 });
@@ -1927,7 +1976,7 @@ ui.deleteModel.addEventListener("click", async () => {
       onConfirm: async () => {
         assertProviderCanBeRemoved("kokoro");
         await player.deleteModel();
-        modelState = "idle";
+        setKokoroModelState("idle");
         ui.modelStatus.textContent = "Modelo y recursos locales de Kokoro eliminados. Los modelos Piper, audios, documentos y sesiones se conservaron.";
         updateVoiceProviderUI();
         renderPlayer(player.snapshot());
@@ -1936,7 +1985,7 @@ ui.deleteModel.addEventListener("click", async () => {
       },
       onError: (error) => {
         if (!storageOperationBusyMessage(error)) {
-          modelState = "error";
+          setKokoroModelState("error");
           ui.modelStatus.textContent = "No se pudo confirmar la eliminación de Kokoro. Puedes reintentar.";
           updateVoiceProviderUI();
           renderPlayer(player.snapshot());
@@ -2015,7 +2064,7 @@ ui.engineState.dataset.state = modelState;
 ui.downloadProgress.hidden = true;
 void boot().catch((error) => {
   ui.fileStatus.textContent = showError(error, "library");
-  modelState = "error";
+  setKokoroModelState("error");
   ui.engineState.textContent = modelLabel();
   ui.engineState.dataset.state = modelState;
 });

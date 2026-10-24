@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ReaderClient, snapshotFromSession } from "../src/reader-client.js";
 import { KokoroWorkerClient } from "../src/tts-worker-client.js";
+import { PiperWorkerClient } from "../src/piper-worker-client.js";
 
 function fakeRuntime(handler = async () => ({ ok: true })) {
   const listeners = new Set();
@@ -65,6 +66,19 @@ test("loading a queue sends replace without sending a play command", async () =>
   client.dispose();
 });
 
+test("voice preparation state requests are read-only background queries", async () => {
+  const runtime = fakeRuntime(async ({ command, payload }) => command === "voice-preparation-status"
+    ? { ok: true, voiceId: payload.voiceId, provider: "kokoro", state: "ready" }
+    : { ok: true });
+  const client = new ReaderClient({ runtime });
+
+  assert.deepEqual(await client.voicePreparationStatus("af_heart"), {
+    ok: true, voiceId: "af_heart", provider: "kokoro", state: "ready"
+  });
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["voice-preparation-status"]);
+  client.dispose();
+});
+
 test("paused preview playback resumes without creating or replacing a reading session", async () => {
   const runtime = fakeRuntime(async ({ command }) => command === "preview" ? {
     ok: true,
@@ -110,9 +124,32 @@ test("Kokoro worker is not created on panel startup and can be disposed after ex
   };
   const client = new KokoroWorkerClient({ workerFactory: () => { created++; return worker; } });
   assert.equal(created, 0);
-  assert.deepEqual(await client.initialize(), { voices: ["af_heart"] });
+  assert.equal(client.preparationStatus().state, "idle");
+  const preparation = client.initialize();
+  assert.equal(client.preparationStatus().state, "loading");
+  assert.deepEqual(await preparation, { voices: ["af_heart"] });
+  assert.equal(client.preparationStatus().state, "ready");
   assert.equal(created, 1);
   assert.equal((await client.synthesize("Hello.", "af_heart")).size, 5);
   await client.dispose();
+  assert.equal(client.preparationStatus().state, "idle");
   assert.equal(terminated, 1);
+});
+
+test("Piper installed-voice status distinguishes cached files from a prepared runtime", async () => {
+  const voiceId = "piper:es_AR-daniela-high";
+  const worker = {
+    postMessage(message) {
+      const value = message.type === "list-installed" ? [{ voiceId, installed: true }]
+        : message.type === "initialize" ? { provider: "piper", voiceId, ready: true } : true;
+      queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value } }));
+    },
+    terminate() {}
+  };
+  const client = new PiperWorkerClient({ workerFactory: () => worker, paths: () => ({}) });
+
+  assert.deepEqual(await client.listInstalled(), [{ voiceId, installed: true, state: "cached" }]);
+  await client.initialize(voiceId);
+  assert.deepEqual(await client.listInstalled(), [{ voiceId, installed: true, state: "ready" }]);
+  await client.dispose();
 });

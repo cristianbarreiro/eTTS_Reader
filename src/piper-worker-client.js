@@ -74,7 +74,18 @@ export class PiperWorkerClient {
   }
 
   modelStatus(voiceId) { return this._enqueue(() => this._request("status", { voiceId })); }
-  listInstalled() { return this._enqueue(() => this._request("list-installed")); }
+  async _listInstalledUnlocked() {
+    const voices = await this._request("list-installed");
+    return voices.map((voice) => ({
+      ...voice,
+      state: this.initializedVoice === voice.voiceId ? "ready" : voice.installed ? "cached" : "idle"
+    }));
+  }
+  listInstalled() { return this._enqueue(() => this._listInstalledUnlocked()); }
+  preparationStatus(voiceId) {
+    return this._enqueue(async () => (await this._listInstalledUnlocked())
+      .find((voice) => voice.voiceId === voiceId) || { voiceId, state: "idle", installed: false });
+  }
   installModel(voiceId, onProgress = () => {}) { return this._enqueue(() => this._request("install", { voiceId }, onProgress)); }
 
   _initializeUnlocked(voiceId, onProgress = () => {}) {
