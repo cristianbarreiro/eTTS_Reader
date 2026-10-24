@@ -32,7 +32,7 @@ import { isAudioStorageBusy, isProviderVoiceInUse, storageOperationBusyError, st
 const $ = (selector) => document.querySelector(selector);
 const ui = {
   text: $("#text-input"), count: $("#count"), chunks: $("#chunk-count"), file: $("#document-file"),
-  fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
+  fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"), retryAuthenticatedPdf: $("#retry-authenticated-pdf"),
   library: $("#library-details"), librarySummary: $("#library-summary-count"), libraryList: $("#library-list"),
   libraryStatus: $("#library-status"),
   confirmDialog: $("#library-confirm-dialog"), confirmTitle: $("#library-confirm-title"),
@@ -99,6 +99,7 @@ let editingForked = false;
 let pendingTabImport = null;
 let tabImportBusy = false;
 let currentTabContext = null;
+let pendingAuthenticatedPdfContext = null;
 let activeImportOperation = 0;
 let followChangeSequence = 0;
 let fileSelectionPurpose = "document";
@@ -176,7 +177,7 @@ function syncImportButtons() {
 
 function setContentBusy(busy) {
   ui.library.setAttribute("aria-busy", String(busy));
-  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed, ui.loadPlayer]) {
+  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.retryAuthenticatedPdf, ui.clearText, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed, ui.loadPlayer]) {
     if (control) control.disabled = busy;
   }
   syncImportButtons();
@@ -887,9 +888,11 @@ function applyActiveTabContext(context, following) {
     const interruptedImport = tabImportBusy;
     activeImportOperation++;
     tabImportBusy = false;
+    pendingAuthenticatedPdfContext = null;
     pendingTabImport = null;
     ui.importPreview.hidden = true;
     ui.importText.value = "";
+    ui.retryAuthenticatedPdf.hidden = true;
     syncImportButtons();
     if (interruptedImport || discardedPreview) {
       const message = "La pestaña de origen cambió. Se descartó la importación pendiente; el editor y la sesión actual siguen intactos.";
@@ -906,19 +909,28 @@ async function refreshActiveTabContext() {
 
 
 
-async function runTabImport(selectionOnly = false) {
+async function runTabImport(selectionOnly = false, { authenticatedPdf = false, expectedContext = null } = {}) {
   if (tabImportBusy || libraryMutationBusy) return;
   const operationId = ++activeImportOperation;
-  const initialContext = currentTabContext;
+  const initialContext = expectedContext || currentTabContext;
+  if (expectedContext && !sameTabDocument(expectedContext, currentTabContext)) {
+    pendingAuthenticatedPdfContext = null;
+    ui.retryAuthenticatedPdf.hidden = true;
+    setImportStatus("La pestaña ya no es el PDF que originó el error. Vuelve a importar desde la pestaña deseada.", "warning");
+    return;
+  }
+  const pdfSelection = selectionOnly && ["pdf", "local-pdf"].includes(initialContext?.state);
   // Keep the optional permission prompt inside the direct user click handler.
-  const permissionRequest = requestSitePermissionFromClick(initialContext, chrome.permissions);
+  const permissionRequest = pdfSelection ? null : requestSitePermissionFromClick(initialContext, chrome.permissions);
   tabImportBusy = true;
   pendingTabImport = null;
+  pendingAuthenticatedPdfContext = null;
   ui.importPreview.hidden = true;
   setImportStatus("Extracción en curso…", "loading");
   syncImportButtons();
   ui.chooseSourceFile.hidden = true;
   ui.retryFileAccess.hidden = true;
+  ui.retryAuthenticatedPdf.hidden = true;
   ui.chooseSourceFile.textContent = "Elegir archivo para importar";
   ui.chooseSourceFile.dataset.previewPdf = "false";
   try {
@@ -962,6 +974,18 @@ async function runTabImport(selectionOnly = false) {
         targetTab: pdfTarget.targetTab,
         fileAccessAllowed: localPdf && pdfTarget.fileAccessAllowed === true,
         selectionOnly: false,
+        authenticatedPdf: authenticatedPdf && !localPdf,
+        permissionsApi: chrome.permissions,
+        validateTarget: authenticatedPdf && !localPdf ? async () => {
+          if (operationId !== activeImportOperation) return { ok: false, state: "stale-context", message: "La operación ya no está activa. No se envió la solicitud autenticada." };
+          const validation = await chrome.runtime.sendMessage({
+            target: "background", command: "validate-current-import",
+            context: pdfTarget.documentContext, operationId
+          }).catch(() => ({ ok: false, state: "stale-context", message: "No se pudo confirmar la pestaña actual. No se envió la solicitud autenticada." }));
+          return operationId === activeImportOperation
+            ? validation
+            : { ok: false, state: "stale-context", message: "La pestaña cambió durante la validación. No se envió la solicitud autenticada." };
+        } : null,
         onStatus: ({ message }) => { if (message && operationId === activeImportOperation) setImportStatus(message); }
       });
       if (operationId !== activeImportOperation) return;
@@ -971,7 +995,7 @@ async function runTabImport(selectionOnly = false) {
           context: pdfTarget.documentContext, operationId
         });
         if (operationId !== activeImportOperation) return;
-        if (!validation?.ok) result = { ...validation, type: localPdf ? "local-pdf" : "pdf", title: pdfTarget.targetTab.title };
+        if (!validation?.ok) result = { ...validation, type: localPdf ? "local-pdf" : "pdf", title: localPdf ? "PDF local" : "PDF" };
       }
     }
     if (operationId !== activeImportOperation) return;
@@ -979,12 +1003,15 @@ async function runTabImport(selectionOnly = false) {
       const details = [result.title, result.type ? tabImportTypeLabel(result.type) : "", result.sourceUrl].filter(Boolean);
       const message = `${details.length ? `${details.join(" · ")}\n` : ""}${result.message || "No se pudo extraer el contenido."}`;
       setImportStatus(message, "error");
-      const { localPdfRecoveryActions } = await import("./tab-import.js");
+      const { localPdfRecoveryActions, remotePdfRecoveryActions } = await import("./tab-import.js");
       const actions = localPdfRecoveryActions(result);
+      const remoteActions = remotePdfRecoveryActions(result);
       ui.chooseSourceFile.hidden = !actions.selectPdf;
       ui.chooseSourceFile.textContent = actions.previewSelectedPdf ? "Seleccionar este PDF" : "Elegir archivo para importar";
       ui.chooseSourceFile.dataset.previewPdf = String(actions.previewSelectedPdf);
       ui.retryFileAccess.hidden = !actions.retryFileAccess;
+      ui.retryAuthenticatedPdf.hidden = !remoteActions.retryWithSiteSession;
+      pendingAuthenticatedPdfContext = remoteActions.retryWithSiteSession ? latestContext : null;
       return;
     }
     showTabImportPreview(result);
@@ -993,6 +1020,7 @@ async function runTabImport(selectionOnly = false) {
     if (operationId !== activeImportOperation) return;
     setImportStatus(showError(error, "import"), "error");
     ui.chooseSourceFile.hidden = false;
+    ui.retryAuthenticatedPdf.hidden = true;
   } finally {
     if (operationId === activeImportOperation) {
       tabImportBusy = false;
@@ -1013,6 +1041,8 @@ function showTabImportPreview(result) {
   ui.importPreview.hidden = false;
   ui.chooseSourceFile.hidden = true;
   ui.retryFileAccess.hidden = true;
+  ui.retryAuthenticatedPdf.hidden = true;
+  pendingAuthenticatedPdfContext = null;
   ui.chooseSourceFile.dataset.previewPdf = "false";
 }
 
@@ -1738,6 +1768,11 @@ ui.chooseSourceFile.addEventListener("click", () => {
   ui.file.click();
 });
 ui.retryFileAccess.addEventListener("click", () => { void runTabImport(false); });
+ui.retryAuthenticatedPdf.addEventListener("click", () => {
+  const expectedContext = pendingAuthenticatedPdfContext;
+  if (!expectedContext) return;
+  void runTabImport(false, { authenticatedPdf: true, expectedContext });
+});
 
 function handlePendingSelection(selection) {
   if (!selection?.id || selection.id === lastPendingSelectionId) return;

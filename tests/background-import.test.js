@@ -151,6 +151,32 @@ test("remote PDF handoff includes a token and rejects navigation before extracti
   } finally { harness.restore(); }
 });
 
+test("PDF selection import explains copy and paste without site access, scripting, or file access", async () => {
+  for (const url of ["https://campus.example.test/reader.pdf?signature=secret", "file:///C:/docs/reader.pdf"]) {
+    const pdfTab = { id: 52, windowId: 2, url, title: "Reader.pdf" };
+    const harness = await loadBackground({ initialTab: pdfTab, fileAccessAllowed: false, hostPermissions: [] });
+    try {
+      const active = await harness.send({ target: "background", command: "get-active-tab-context" });
+      const result = await harness.send({
+        target: "background", command: "extract-current-tab", selectionOnly: true,
+        context: active.context, operationId: 53
+      });
+      assert.equal(result.state, "selection-unavailable");
+      assert.match(result.message, /Ctrl\+C.*Ctrl\+V/);
+      assert.equal(harness.calls.permissionRequests.length, 0);
+      assert.equal(harness.calls.scripts.length, 0);
+
+      harness.api.action.onClicked.fire(pdfTab);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const authorizedResult = await harness.send({ target: "background", command: "extract-tab", selectionOnly: true });
+      assert.equal(authorizedResult.state, "selection-unavailable");
+      assert.match(authorizedResult.message, /Ctrl\+C.*Ctrl\+V/);
+      assert.equal(harness.calls.permissionRequests.length, 0);
+      assert.equal(harness.calls.scripts.length, 0);
+    } finally { harness.restore(); }
+  }
+});
+
 test("local PDF handoff respects Edge file access permission and does not inject into the viewer", async () => {
   const pdfTab = { id: 21, windowId: 2, url: "file:///C:/docs/report.pdf", title: "report.pdf" };
   const denied = await loadBackground({ initialTab: pdfTab, fileAccessAllowed: false });

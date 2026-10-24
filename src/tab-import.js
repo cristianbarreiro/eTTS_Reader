@@ -250,6 +250,26 @@ function pdfName(tab, url) {
   return /\.pdf$/i.test(name) ? name : `${name}.pdf`;
 }
 
+function pdfDisplayTitle(tab) {
+  const title = String(tab?.title || "").trim();
+  try {
+    const parsed = new URL(title);
+    if (["http:", "https:"].includes(parsed.protocol)) return "PDF";
+    if (parsed.protocol === "file:") return "PDF local";
+  } catch { /* A normal browser title is safe to keep after removing query-like suffixes below. */ }
+  if (/^(?:[a-z]:[\\/]|\\\\|\/)/i.test(title)) return /^file:/i.test(tab?.url || "") ? "PDF local" : "PDF";
+  const clean = title.split(/[?#]/, 1)[0];
+  const basename = clean.split(/[\\/]/).filter(Boolean).at(-1);
+  return String(basename || clean || pdfName(tab, tab?.url || "")).slice(0, 180);
+}
+
+function safePdfSourceOrigin(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+  } catch { return ""; }
+}
+
 async function readBoundedBlob(response, maxBytes) {
   const declaredLength = Number(response.headers?.get?.("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error("El PDF supera el límite de 25 MB. Descárgalo y usa el selector de archivos.");
@@ -279,8 +299,55 @@ async function readBoundedBlob(response, maxBytes) {
   return new Blob(parts, { type: response.headers?.get?.("content-type") || "application/pdf" });
 }
 
-function errorResult(kind, message, tab = null, type = "") {
-  return { ok: false, state: kind, type, message, title: tab?.title || "", sourceUrl: safeSourceUrl(tab?.url || "") };
+function errorResult(kind, message, tab = null, type = "", metadata = {}) {
+  const pdf = type === "pdf" || type === "local-pdf";
+  return {
+    ok: false, state: kind, type, message,
+    title: pdf ? pdfDisplayTitle(tab) : tab?.title || "",
+    sourceUrl: pdf ? safePdfSourceOrigin(tab?.url || "") : safeSourceUrl(tab?.url || ""),
+    ...(metadata.authenticatedAttempted ? { authenticatedAttempted: true } : {})
+  };
+}
+
+function responseContentType(response) {
+  return String(response?.headers?.get?.("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+}
+
+function isHtmlContentType(contentType) {
+  return contentType === "text/html" || contentType === "application/xhtml+xml";
+}
+
+function isHtmlDocumentPrefix(value) {
+  return /^\s*(?:\uFEFF\s*)?(?:<!doctype\s+html|<html\b|<head\b|<body\b)/i.test(value);
+}
+
+function remotePdfResponseError(response, tab, authenticatedAttempted) {
+  const metadata = { authenticatedAttempted };
+  if (!response) return errorResult("network-error", "No se recibió una respuesta del servidor. Comprueba la conexión o selecciona el archivo PDF manualmente.", tab, "pdf", metadata);
+  if (response.type === "opaqueredirect" || (authenticatedAttempted && response.redirected)
+    || (response.status >= 300 && response.status < 400)) {
+    return errorResult("redirect-not-allowed", "El servidor redirigió la solicitud. Por seguridad, eTTS no seguirá esa redirección con la sesión del sitio. Descarga el PDF desde el sitio y selecciónalo manualmente.", tab, "pdf", metadata);
+  }
+
+  const requestedUrl = new URL(tab.url);
+  const finalUrl = response.url ? new URL(response.url) : requestedUrl;
+  if (requestedUrl.origin !== finalUrl.origin) {
+    return errorResult("redirect-not-allowed", "El PDF redirigió a otro origen. Por seguridad, eTTS no enviará credenciales ni seguirá esa redirección. Descarga el archivo desde el sitio y selecciónalo manualmente.", tab, "pdf", metadata);
+  }
+
+  const contentType = responseContentType(response);
+  if (isHtmlContentType(contentType)) {
+    const status = response.status && response.status !== 200 ? ` (HTTP ${response.status})` : "";
+    return errorResult("html-response", `El servidor respondió${status} con HTML, no con el PDF. No se procesó el contenido de esa página. El recurso podría requerir tu sesión del sitio; puedes reintentar con la sesión o seleccionar el archivo manualmente.`, tab, "pdf", metadata);
+  }
+  if (response.status === 413) {
+    return errorResult("too-large", "El servidor rechazó el PDF por su tamaño. Descárgalo y usa el selector de archivos si está dentro del límite de 25 MB.", tab, "pdf", metadata);
+  }
+  if (!response.ok) {
+    const status = Number.isInteger(response.status) && response.status ? ` HTTP ${response.status}` : "";
+    return errorResult("http-error", `El servidor no permitió recuperar el PDF${status}. Puedes reintentar con la sesión del sitio o seleccionar el archivo manualmente.`, tab, "pdf", metadata);
+  }
+  return null;
 }
 
 function normalizedFileUrl(value) {
@@ -294,10 +361,18 @@ export function localPdfRecoveryActions(result) {
   const state = result?.state || "";
   const localPdf = result?.type === "local-pdf" || ["local-pdf-target", "local-pdf-unavailable", "file-access-disabled", "file-access-unknown"].includes(state);
   const pdf = localPdf || result?.type === "pdf" || state === "file-unavailable" || /\.pdf(?:$|\s)/i.test(result?.title || "");
+  const manualSelectionUseful = !["selection-unavailable", "no-text", "too-large"].includes(state);
   return {
-    selectPdf: Boolean(pdf),
-    previewSelectedPdf: Boolean(localPdf),
+    selectPdf: Boolean(pdf && manualSelectionUseful),
+    previewSelectedPdf: Boolean(localPdf && manualSelectionUseful),
     retryFileAccess: state === "file-access-disabled"
+  };
+}
+
+export function remotePdfRecoveryActions(result) {
+  const canRetryWithSiteSession = ["html-response", "http-error", "network-error", "unsupported-content-type", "invalid-pdf-signature", "file-unavailable", "site-permission-required"].includes(result?.state);
+  return {
+    retryWithSiteSession: result?.type === "pdf" && canRetryWithSiteSession && result.authenticatedAttempted !== true
   };
 }
 
@@ -321,10 +396,13 @@ export function createLocalPdfPreview(file, text, maxCharacters = MAX_IMPORT_CHA
 export async function importCurrentTab({
   tabsApi = globalThis.chrome?.tabs,
   scriptingApi = globalThis.chrome?.scripting,
+  permissionsApi = globalThis.chrome?.permissions,
   fetchImpl = globalThis.fetch,
   targetTab = null,
   fileAccessAllowed = false,
   selectionOnly = false,
+  authenticatedPdf = false,
+  validateTarget = null,
   maxCharacters = MAX_IMPORT_CHARACTERS,
   maxBytes = MAX_IMPORT_BYTES,
   onStatus = () => {},
@@ -349,26 +427,71 @@ export async function importCurrentTab({
     return errorResult(classification.kind, classification.message, tab, classification.kind);
   }
   const localPdf = classification.kind === "local-pdf";
+  if (selectionOnly && (classification.kind === "pdf" || localPdf)) {
+    return errorResult("selection-unavailable", "Edge no permite leer directamente la selección de este visor. Selecciona el texto en el PDF, pulsa Ctrl+C y pégalo en el editor con Ctrl+V.", tab, localPdf ? "local-pdf" : "pdf");
+  }
   if (localPdf && fileAccessAllowed !== true) {
     const state = fileAccessAllowed === false ? "file-access-disabled" : "file-access-unknown";
     return errorResult(state, fileAccessAllowed === false
       ? "El permiso para leer archivos locales no está activo. En edge://extensions abre Detalles de la extensión y activa ‘Permitir el acceso a direcciones URL de archivo’; luego vuelve a comprobarlo o selecciona el PDF manualmente."
       : "No se pudo confirmar el permiso para leer archivos locales. Vuelve a comprobarlo o selecciona el PDF manualmente.", tab, "local-pdf");
   }
-  if (selectionOnly && (classification.kind === "pdf" || localPdf)) {
-    return errorResult("selection-unavailable", "El visor PDF de Edge no expone su selección mediante scripting. Selecciona texto en una página web o abre el archivo con el selector.", tab, "pdf");
-  }
   if (classification.kind === "pdf" || localPdf) {
     onStatus({
       state: localPdf ? "retrieving-local-pdf" : "retrieving-pdf",
-      message: localPdf ? "Intentando recuperar el PDF local…" : "Documento compatible · recuperando el PDF sin cookies para extraerlo localmente…",
-      title: tab.title || ""
+      message: localPdf ? "Intentando recuperar el PDF local…" : authenticatedPdf ? "Reintentando el PDF con la sesión del sitio y sin seguir redirecciones…" : "Documento compatible · recuperando el PDF sin cookies para extraerlo localmente…",
+      title: pdfDisplayTitle(tab)
     });
+    const authMetadata = authenticatedPdf && !localPdf ? { authenticatedAttempted: true } : {};
+    if (authenticatedPdf && !localPdf) {
+      let requestedUrl;
+      try { requestedUrl = new URL(tab.url); }
+      catch { return errorResult("permission-required", "No se pudo validar la dirección actual del PDF.", tab, "pdf"); }
+      if (!["http:", "https:"].includes(requestedUrl.protocol) || !requestedUrl.hostname) {
+        return errorResult("permission-required", "El reintento con sesión solo está disponible para PDF HTTP o HTTPS.", tab, "pdf");
+      }
+      if (typeof validateTarget !== "function") {
+        return errorResult("stale-context", "No se pudo confirmar que la pestaña siga en el mismo PDF. Vuelve a intentarlo desde esa pestaña.", tab, "pdf");
+      }
+      let validation;
+      try { validation = await validateTarget(); } catch { validation = null; }
+      const validatedContext = validation?.context;
+      if (!validation?.ok || validatedContext?.tabId !== tab.id || validatedContext?.url !== tab.url || !validatedContext?.documentToken) {
+        return errorResult(validation?.state || "stale-context", validation?.message || "La pestaña cambió antes del reintento. No se envió ninguna solicitud con la sesión del sitio.", tab, "pdf");
+      }
+      const hostPattern = `${requestedUrl.protocol}//${requestedUrl.hostname}/*`;
+      let sitePermission = false;
+      try { sitePermission = await permissionsApi?.contains?.({ origins: [hostPattern] }) === true; } catch { sitePermission = false; }
+      if (!sitePermission) {
+        return errorResult("site-permission-required", "Edge no tiene permiso para este sitio. Autoriza el acceso desde el aviso de Edge y vuelve a pulsar «Reintentar con la sesión del sitio». No se realizó la solicitud autenticada.", tab, "pdf");
+      }
+    }
+
+    let response;
     try {
-      const response = await fetchImpl(tab.url, { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
-      if (!response?.ok) return errorResult(localPdf ? "local-pdf-unavailable" : "file-unavailable", localPdf
-        ? "Edge no entregó los bytes originales del PDF desde el visor. Selecciona el archivo PDF original manualmente."
-        : "No se pudo recuperar el PDF (puede requerir acceso o redirigir a otro origen). Descárgalo y selecciónalo manualmente.", tab, localPdf ? "local-pdf" : "pdf");
+      response = await fetchImpl(tab.url, {
+        credentials: authenticatedPdf && !localPdf ? "include" : "omit",
+        ...(authenticatedPdf && !localPdf ? { redirect: "manual" } : {}),
+        referrerPolicy: "no-referrer", cache: "no-store"
+      });
+    } catch {
+      if (!localPdf) {
+        const message = authenticatedPdf
+          ? "No se pudo descargar el PDF usando la sesión del sitio. Comprueba la conexión o selecciona el archivo manualmente."
+          : "No se pudo descargar el PDF. Puedes reintentar con la sesión del sitio o seleccionar el archivo manualmente.";
+        return errorResult("network-error", message, tab, "pdf", authMetadata);
+      }
+      return errorResult("local-pdf-unavailable", "Edge no entregó los bytes originales del PDF desde el visor. Selecciona el archivo PDF original manualmente.", tab, "local-pdf");
+    }
+
+    if (!localPdf) {
+      const responseError = remotePdfResponseError(response, tab, authenticatedPdf);
+      if (responseError) return responseError;
+    } else if (!response?.ok) {
+      return errorResult("local-pdf-unavailable", "Edge no entregó los bytes originales del PDF desde el visor. Selecciona el archivo PDF original manualmente.", tab, "local-pdf");
+    }
+
+    try {
       const requestedUrl = new URL(tab.url);
       const finalUrl = response.url ? new URL(response.url) : requestedUrl;
       if (localPdf) {
@@ -379,28 +502,57 @@ export async function importCurrentTab({
         return errorResult("file-unavailable", "El PDF redirige a otro origen que no tiene permiso temporal. Descárgalo y selecciónalo manualmente.", tab, "pdf");
       }
       const blob = await readBoundedBlob(response, maxBytes);
-      const signature = await blob.slice(0, 5).text();
-      if (!signature.startsWith("%PDF-")) return errorResult(localPdf ? "local-pdf-unavailable" : "file-unavailable", localPdf
-        ? "La dirección parecía un PDF, pero Edge no entregó sus bytes originales. Selecciona el archivo PDF manualmente."
-        : "La pestaña parece un PDF, pero el servidor no entregó los bytes del archivo. Descárgalo y selecciónalo manualmente.", tab, localPdf ? "local-pdf" : "pdf");
-      onStatus({ state: "extracting-pdf", message: localPdf ? "PDF recuperado · extrayendo texto en este dispositivo…" : "Extrayendo texto del PDF en este dispositivo…", title: tab.title || "" });
+      const prefix = await blob.slice(0, 1024).text();
+      const hasPdfSignature = prefix.slice(0, 5).startsWith("%PDF-");
+      if (!localPdf && !hasPdfSignature && isHtmlDocumentPrefix(prefix)) {
+        return errorResult("html-response", `El servidor respondió con contenido HTML, no con el PDF. No se procesó como documento.${authenticatedPdf ? " Comprueba el acceso al sitio o descarga el PDF manualmente." : " El recurso podría requerir tu sesión del sitio; puedes reintentar con la sesión o seleccionar el archivo manualmente."}`, tab, "pdf", authMetadata);
+      }
+      const contentType = responseContentType(response);
+      if (!localPdf && contentType && !/^application\/(?:pdf|octet-stream|x-pdf)$/.test(contentType)) {
+        return errorResult("unsupported-content-type", "El servidor indicó un tipo de contenido que no corresponde a un PDF. No se envió a PDF.js; puedes reintentar con la sesión o seleccionar el archivo manualmente.", tab, "pdf", authMetadata);
+      }
+      if (!hasPdfSignature) {
+        return errorResult(localPdf ? "local-pdf-unavailable" : "invalid-pdf-signature", localPdf
+          ? "La dirección parecía un PDF, pero Edge no entregó sus bytes originales. Selecciona el archivo PDF manualmente."
+          : authenticatedPdf
+            ? "La respuesta autenticada no contiene una firma PDF válida. Descarga el PDF desde el sitio y selecciónalo manualmente."
+            : "La pestaña parece un PDF, pero el servidor no entregó los bytes del archivo. Puedes reintentar con la sesión del sitio o seleccionar el archivo manualmente.", tab, localPdf ? "local-pdf" : "pdf", authMetadata);
+      }
+      onStatus({ state: "extracting-pdf", message: localPdf ? "PDF recuperado · extrayendo texto en este dispositivo…" : "Extrayendo texto del PDF en este dispositivo…", title: pdfDisplayTitle(tab) });
       const file = new File([blob], pdfName(tab, tab.url), { type: "application/pdf" });
       let extract = extractPdf;
       if (!extract) extract = (await import("./documents.js")).extractDocument;
-      const text = String(await extract(file) || "");
-      if (!text.trim()) return errorResult("no-text", "El PDF no contiene texto extraíble. Si es un escaneo, usa OCR fuera de la extensión y vuelve a importarlo.", tab, "pdf");
+      let text;
+      try { text = String(await extract(file) || ""); }
+      catch (error) {
+        const message = error?.message || "No se pudo interpretar el archivo PDF.";
+        const state = /no contiene texto extraíble|escaneo/i.test(message) ? "no-text" : "pdf-extraction-error";
+        return errorResult(state, state === "no-text"
+          ? "El PDF no contiene texto extraíble. Si es un escaneo, usa OCR fuera de la extensión y vuelve a importarlo."
+        : "Se descargó el PDF, pero no se pudo interpretar localmente. Descárgalo y selecciónalo manualmente.", tab, localPdf ? "local-pdf" : "pdf", authMetadata);
+      }
+      if (!text.trim()) return errorResult("no-text", "El PDF no contiene texto extraíble. Si es un escaneo, usa OCR fuera de la extensión y vuelve a importarlo.", tab, localPdf ? "local-pdf" : "pdf", authMetadata);
       const limited = text.slice(0, maxCharacters);
       return {
-        ok: true, state: "complete", title: tab.title || file.name, sourceUrl: localPdf ? "" : safeSourceUrl(tab.url),
+        ok: true, state: "complete", title: pdfDisplayTitle(tab) || "PDF", sourceUrl: localPdf ? "" : safePdfSourceOrigin(tab.url),
         type: localPdf ? "local-pdf" : "pdf", text: limited, characters: limited.length, truncated: text.length > maxCharacters,
         message: text.length > maxCharacters ? `Extracción completada; se limitaron los primeros ${maxCharacters.toLocaleString()} caracteres.` : localPdf ? "PDF local recuperado y extraído en este dispositivo. Revisa el resultado antes de importarlo." : "Extracción completada desde el PDF localmente."
       };
     } catch (error) {
       const message = error?.message || "No se pudo extraer el PDF.";
       const state = /no contiene texto extraíble|escaneo/i.test(message) ? "no-text" : /25 MB/i.test(message) ? "too-large" : "file-unavailable";
+      const safeMessage = state === "no-text"
+        ? "El PDF no contiene texto extraíble. Si es un escaneo, usa OCR fuera de la extensión y vuelve a importarlo."
+        : state === "too-large"
+          ? "El PDF supera el límite de 25 MB. Descárgalo y usa el selector de archivos con un documento dentro del límite."
+          : localPdf
+            ? "Edge no pudo leer los bytes de este PDF desde el visor. Selecciona el PDF original manualmente."
+            : authenticatedPdf
+              ? "No se pudo leer la respuesta autenticada del PDF. Descarga el archivo desde el sitio y selecciónalo manualmente."
+              : "No se pudo leer la respuesta del PDF. Puedes reintentar con la sesión del sitio o seleccionar el archivo manualmente.";
       return errorResult(localPdf && state === "file-unavailable" ? "local-pdf-unavailable" : state,
-        localPdf && state === "file-unavailable" ? `Edge no pudo leer los bytes de este PDF desde el visor. Selecciona el archivo PDF original manualmente. Detalle: ${message}` : `${message} Puedes descargarlo y seleccionar el archivo original.`,
-        tab, localPdf ? "local-pdf" : "pdf");
+        safeMessage,
+        tab, localPdf ? "local-pdf" : "pdf", authMetadata);
     }
   }
 

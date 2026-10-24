@@ -7,6 +7,7 @@ import {
   extractReadablePage,
   importCurrentTab,
   localPdfRecoveryActions,
+  remotePdfRecoveryActions,
   safeSourceUrl
 } from "../src/tab-import.js";
 
@@ -177,14 +178,14 @@ test("remote PDF bytes are bounded, fetched without cookies, and passed to the e
   assert.equal(result.ok, true);
   assert.equal(result.type, "pdf");
   assert.equal(result.text, "Extracted PDF text.");
-  assert.equal(result.sourceUrl, "https://example.test/papers/study.pdf");
+  assert.equal(result.sourceUrl, "https://example.test");
   assert.equal(fetchOptions.credentials, "omit");
   assert.equal(fetchOptions.referrerPolicy, "no-referrer");
   assert.equal(extractedFile.name, "study.pdf");
   assert.equal(extractedFile.type, "application/pdf");
 });
 
-test("PDF fetch failures, scan-only files, and oversized PDFs never report a successful extraction", async () => {
+test("remote PDF HTTP failures, scan-only files, and oversized PDFs never report a successful extraction", async () => {
   const tab = { id: 13, url: "https://example.test/scanned.pdf", title: "Scanned.pdf" };
   const unavailable = await importCurrentTab({
     tabsApi: { async query() { return [tab]; } },
@@ -192,7 +193,9 @@ test("PDF fetch failures, scan-only files, and oversized PDFs never report a suc
     fetchImpl: async () => new Response("denied", { status: 403 }),
     extractPdf: async () => { assert.fail("403 must stop before PDF extraction"); }
   });
-  assert.equal(unavailable.state, "file-unavailable");
+  assert.equal(unavailable.state, "http-error");
+  assert.match(unavailable.message, /HTTP 403/);
+  assert.equal(remotePdfRecoveryActions(unavailable).retryWithSiteSession, true);
 
   const scanOnly = await importCurrentTab({
     tabsApi: { async query() { return [tab]; } },
@@ -201,6 +204,7 @@ test("PDF fetch failures, scan-only files, and oversized PDFs never report a suc
     extractPdf: async () => { throw new Error("Este PDF no contiene texto extraíble. Puede ser un escaneo."); }
   });
   assert.equal(scanOnly.state, "no-text");
+  assert.equal(remotePdfRecoveryActions(scanOnly).retryWithSiteSession, false);
 
   const oversized = await importCurrentTab({
     tabsApi: { async query() { return [tab]; } },
@@ -209,6 +213,154 @@ test("PDF fetch failures, scan-only files, and oversized PDFs never report a suc
     extractPdf: async () => { assert.fail("oversized PDF must stop before PDF extraction"); }
   });
   assert.equal(oversized.state, "too-large");
+  assert.equal(remotePdfRecoveryActions(oversized).retryWithSiteSession, false);
+
+  const networkFailure = await importCurrentTab({
+    targetTab: tab, scriptingApi: null,
+    fetchImpl: async () => { throw new Error("temporary request URL with signature=secret"); },
+    extractPdf: async () => { assert.fail("network errors must stop before PDF.js"); }
+  });
+  assert.equal(networkFailure.state, "network-error");
+  assert.equal(remotePdfRecoveryActions(networkFailure).retryWithSiteSession, true);
+  assert.doesNotMatch(networkFailure.message, /signature=secret/);
+});
+
+test("authenticated PDF retry is explicit, permission-checked, context-validated, and blocks redirects", async () => {
+  const tab = { id: 40, url: "https://campus.example.test/files/report.pdf?signature=private", title: "https://campus.example.test/files/report.pdf?token=private" };
+  const validatedContext = { tabId: tab.id, url: tab.url, documentToken: "document-40" };
+  let options;
+  let validationCalls = 0;
+  let extracted = false;
+  const result = await importCurrentTab({
+    targetTab: tab, authenticatedPdf: true, scriptingApi: null,
+    permissionsApi: { async contains(details) { assert.deepEqual(details, { origins: ["https://campus.example.test/*"] }); return true; } },
+    validateTarget: async () => { validationCalls++; return { ok: true, context: validatedContext }; },
+    fetchImpl: async (_url, fetchOptions) => {
+      options = fetchOptions;
+      return new Response(new Blob(["%PDF-1.7 private bytes"]), { headers: { "content-type": "application/pdf" } });
+    },
+    extractPdf: async () => { extracted = true; return "Authenticated PDF text"; }
+  });
+  assert.equal(validationCalls, 1);
+  assert.equal(options.credentials, "include");
+  assert.equal(options.redirect, "manual");
+  assert.equal(options.referrerPolicy, "no-referrer");
+  assert.equal(options.cache, "no-store");
+  assert.equal(result.ok, true);
+  assert.equal(result.text, "Authenticated PDF text");
+  assert.equal(result.title, "PDF");
+  assert.equal(result.sourceUrl, "https://campus.example.test");
+  assert.equal(extracted, true);
+
+  let redirectedBodyRead = false;
+  const redirect = await importCurrentTab({
+    targetTab: tab, authenticatedPdf: true, scriptingApi: null,
+    permissionsApi: { async contains() { return true; } },
+    validateTarget: async () => ({ ok: true, context: validatedContext }),
+    fetchImpl: async (_url, fetchOptions) => {
+      assert.equal(fetchOptions.redirect, "manual");
+      return { ok: false, status: 0, type: "opaqueredirect", redirected: false, url: "", headers: { get: () => null }, get body() { redirectedBodyRead = true; return null; } };
+    },
+    extractPdf: async () => { assert.fail("redirect response must not reach PDF.js"); }
+  });
+  assert.equal(redirect.state, "redirect-not-allowed");
+  assert.equal(redirect.authenticatedAttempted, true);
+  assert.equal(remotePdfRecoveryActions(redirect).retryWithSiteSession, false);
+  assert.equal(redirectedBodyRead, false);
+
+  const crossOriginResponse = new Response(new Blob(["%PDF-1.7 bytes"]), { headers: { "content-type": "application/pdf" } });
+  Object.defineProperty(crossOriginResponse, "url", { value: "https://cdn.other.test/report.pdf?signature=private" });
+  const crossOriginRedirect = await importCurrentTab({
+    targetTab: tab, scriptingApi: null,
+    fetchImpl: async () => crossOriginResponse,
+    extractPdf: async () => { assert.fail("cross-origin redirect must not reach PDF.js"); }
+  });
+  assert.equal(crossOriginRedirect.state, "redirect-not-allowed");
+  assert.equal(remotePdfRecoveryActions(crossOriginRedirect).retryWithSiteSession, false);
+  assert.equal(crossOriginRedirect.sourceUrl, "https://campus.example.test");
+  assert.doesNotMatch(JSON.stringify(crossOriginRedirect), /signature=private/);
+});
+
+test("authenticated PDF fetch refuses to start without current context and host permission", async () => {
+  const tab = { id: 41, url: "https://campus.example.test/files/report.pdf?token=secret", title: "Report.pdf" };
+  const validatedContext = { tabId: tab.id, url: tab.url, documentToken: "document-41" };
+  let fetchCalls = 0;
+  const stale = await importCurrentTab({
+    targetTab: tab, authenticatedPdf: true,
+    permissionsApi: { async contains() { return true; } },
+    validateTarget: async () => ({ ok: false, state: "stale-context", message: "La pestaña cambió." }),
+    fetchImpl: async () => { fetchCalls++; }
+  });
+  assert.equal(stale.state, "stale-context");
+  assert.equal(fetchCalls, 0);
+
+  const denied = await importCurrentTab({
+    targetTab: tab, authenticatedPdf: true,
+    permissionsApi: { async contains() { return false; } },
+    validateTarget: async () => ({ ok: true, context: validatedContext }),
+    fetchImpl: async () => { fetchCalls++; }
+  });
+  assert.equal(denied.state, "site-permission-required");
+  assert.equal(fetchCalls, 0);
+});
+
+test("remote PDF diagnostics detect HTML and keep manual recovery without exposing URL tokens", async () => {
+  const tab = { id: 42, url: "https://campus.example.test/file.pdf?token=secret", title: "https://campus.example.test/file.pdf?token=secret" };
+  let extractionCalls = 0;
+  const html = await importCurrentTab({
+    targetTab: tab, scriptingApi: null,
+    fetchImpl: async () => new Response("<!doctype html><title>Sign in</title>", { status: 403, headers: { "content-type": "text/html; charset=utf-8" } }),
+    extractPdf: async () => { extractionCalls++; return "should not run"; }
+  });
+  assert.equal(html.state, "html-response");
+  assert.match(html.message, /HTML, no con el PDF/);
+  assert.equal(remotePdfRecoveryActions(html).retryWithSiteSession, true);
+  assert.equal(html.sourceUrl, "https://campus.example.test");
+  assert.equal(html.title, "PDF");
+  assert.doesNotMatch(JSON.stringify(html), /token=secret/);
+  assert.equal(extractionCalls, 0);
+
+  const sniffedHtml = await importCurrentTab({
+    targetTab: { ...tab, title: "File" }, scriptingApi: null,
+    fetchImpl: async () => new Response("<html><body>Sign in</body></html>"),
+    extractPdf: async () => { extractionCalls++; return "should not run"; }
+  });
+  assert.equal(sniffedHtml.state, "html-response");
+  assert.equal(extractionCalls, 0);
+
+  const wrongMime = await importCurrentTab({
+    targetTab: tab, scriptingApi: null,
+    fetchImpl: async () => new Response("%PDF-1.7 bytes", { headers: { "content-type": "text/plain" } }),
+    extractPdf: async () => { extractionCalls++; return "should not run"; }
+  });
+  assert.equal(wrongMime.state, "unsupported-content-type");
+  assert.equal(remotePdfRecoveryActions(wrongMime).retryWithSiteSession, true);
+  assert.equal(extractionCalls, 0);
+
+  const authenticatedHtml = await importCurrentTab({
+    targetTab: tab, authenticatedPdf: true, scriptingApi: null,
+    permissionsApi: { async contains() { return true; } },
+    validateTarget: async () => ({ ok: true, context: { tabId: tab.id, url: tab.url, documentToken: "document-42" } }),
+    fetchImpl: async () => new Response("<html>Sign in</html>", { headers: { "content-type": "text/html" } }),
+    extractPdf: async () => { extractionCalls++; return "should not run"; }
+  });
+  assert.equal(authenticatedHtml.state, "html-response");
+  assert.equal(authenticatedHtml.authenticatedAttempted, true);
+  assert.equal(remotePdfRecoveryActions(authenticatedHtml).retryWithSiteSession, false);
+  assert.equal(extractionCalls, 0);
+});
+
+test("remote PDF selection explains copy and paste without fetching or requesting files", async () => {
+  let fetchCalls = 0;
+  const result = await importCurrentTab({
+    targetTab: { id: 43, url: "https://campus.example.test/reader.pdf", title: "Reader.pdf" },
+    selectionOnly: true,
+    fetchImpl: async () => { fetchCalls++; }
+  });
+  assert.equal(result.state, "selection-unavailable");
+  assert.match(result.message, /Ctrl\+C.*Ctrl\+V/);
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(localPdfRecoveryActions(result), { selectPdf: false, previewSelectedPdf: false, retryFileAccess: false });
 });
 
 test("local PDF fetching requires Edge file access and never injects into the PDF viewer", async () => {

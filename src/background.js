@@ -391,6 +391,13 @@ async function extractCurrentTab(selectionOnly, expectedContext, operationId) {
   if (classification.kind === "restricted") {
     return { ok: false, state: "restricted", type: "restricted", title: context.title, operationId, message: "Edge restringe esta página. Usa el selector de archivos o pega el texto en el editor." };
   }
+  if (selectionOnly && ["pdf", "local-pdf"].includes(classification.kind)) {
+    return {
+      ok: false, state: "selection-unavailable", type: classification.kind,
+      title: classification.kind === "local-pdf" ? "PDF local" : "PDF", operationId,
+      message: "Edge no permite leer directamente la selección de este visor. Selecciona el texto en el PDF, pulsa Ctrl+C y pégalo en el editor con Ctrl+V."
+    };
+  }
   if (classification.kind === "local-text-document") {
     return { ok: false, state: "local-document", type: "local-document", title: context.title, operationId, message: "Edge no permite extraer este archivo local desde el visor. Usa el selector de archivos." };
   }
@@ -398,9 +405,6 @@ async function extractCurrentTab(selectionOnly, expectedContext, operationId) {
     return { ok: false, state: "tabs-permission-required", type: "permission-required", title: context.title, operationId, message: "Edge no expuso la dirección de esta pestaña. Activa «Seguir pestaña activa» o vuelve a abrir el lector desde ella." };
   }
   if (classification.kind === "local-pdf") {
-    if (selectionOnly) {
-      return { ok: false, state: "selection-unavailable", type: "local-pdf", title: context.title, operationId, message: "El visor PDF de Edge no expone selecciones mediante scripting. Usa Importar pestaña actual o selecciona el PDF original." };
-    }
     const fileAccessAllowed = await isFileSchemeAccessAllowed();
     if (fileAccessAllowed !== true) {
       return {
@@ -487,6 +491,12 @@ async function extractAuthorizedTab(selectionOnly) {
   if (!validated.ok) return validated;
   const { target, tab } = validated;
   const classification = classifyTab(tab);
+  if (selectionOnly && ["pdf", "local-pdf"].includes(classification.kind)) {
+    return {
+      ok: false, state: "selection-unavailable", type: classification.kind, title: classification.kind === "local-pdf" ? "PDF local" : "PDF",
+      message: "Edge no permite leer directamente la selección de este visor. Selecciona el texto en el PDF, pulsa Ctrl+C y pégalo en el editor con Ctrl+V."
+    };
+  }
   if (classification.kind === "pdf") return { ok: true, state: "pdf-target", targetTab: { id: tab.id, url: tab.url, title: tab.title || "PDF" }, targetToken: target.token, type: "pdf" };
   if (classification.kind === "local-pdf") {
     if (selectionOnly) {
