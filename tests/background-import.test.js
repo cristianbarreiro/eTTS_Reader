@@ -13,12 +13,12 @@ async function loadBackground({
   initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" },
   scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false },
   scriptResponse = null, fileAccessAllowed = false, tabsPermissionGranted = false,
-  hostPermissions = [], permissionDecision = true
+  hostPermissions = [], permissionDecision = true, offscreenExists = true
 } = {}) {
   const values = new Map();
   const localValues = new Map();
   const grantedHosts = new Set(hostPermissions);
-  const calls = { panel: [], scripts: [], contextMenu: [], messages: [], permissionRequests: [] };
+  const calls = { panel: [], scripts: [], contextMenu: [], messages: [], permissionRequests: [], offscreenCreates: [] };
   const api = {
     runtime: {
       getManifest: () => ({ side_panel: { default_path: "sidepanel.html" } }),
@@ -65,7 +65,11 @@ async function loadBackground({
     action: { onClicked: event() },
     contextMenus: { onClicked: event(), async removeAll() {}, create(item) { calls.contextMenu.push(item); } },
     scripting: { async executeScript(options) { calls.scripts.push(options); return scriptResponse ? scriptResponse(options) : [{ result: scriptResult }]; } },
-    offscreen: { async hasDocument() { return true; }, async closeDocument() {} }
+    offscreen: {
+      async hasDocument() { return offscreenExists; },
+      async createDocument(details) { calls.offscreenCreates.push(details); offscreenExists = true; },
+      async closeDocument() { offscreenExists = false; }
+    }
   };
   const previousChrome = globalThis.chrome;
   globalThis.chrome = api;
@@ -80,6 +84,20 @@ async function loadBackground({
     restore() { globalThis.chrome = previousChrome; }
   };
 }
+
+test("queue preparation and recovery create the persistent offscreen engine when it is absent", async () => {
+  const harness = await loadBackground({ offscreenExists: false });
+  try {
+    const session = { id: "prepared-session", sourceText: "Hello.", chunks: ["Hello."], queuePrepared: true };
+    await harness.send({ target: "background", command: "replace", payload: { session } });
+    assert.equal(harness.calls.offscreenCreates.length, 1);
+    assert.equal(harness.calls.offscreenCreates[0].url, "offscreen.html");
+
+    harness.api.offscreen.closeDocument();
+    await harness.send({ target: "background", command: "restore", payload: { session } });
+    assert.equal(harness.calls.offscreenCreates.length, 2);
+  } finally { harness.restore(); }
+});
 
 test("toolbar invocation captures the source tab and extracts only from that authorized tab", async () => {
   const harness = await loadBackground();

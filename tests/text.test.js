@@ -12,6 +12,11 @@ test("pasted plain text Hola mundo immediately becomes one readable chunk", () =
   assert.deepEqual(splitText(text), ["Hola mundo"]);
 });
 
+test("short imported content keeps its paragraphs together as one playback chunk", () => {
+  const text = "Latest commit\n\ncristianbarreiro\n\nfeat: importar contenido de la pestaña actual\n\n6394aad · Oct 23, 2026";
+  assert.deepEqual(splitText(text), ["Latest commit\n\ncristianbarreiro\n\nfeat: importar contenido de la pestaña actual\n\n6394aad · Oct 23, 2026"]);
+});
+
 test("splitText preserves order and keeps chunks within the requested limit", () => {
   const source = "First sentence. Second sentence.\n\nThird sentence.";
   const chunks = splitText(source, 20);

@@ -111,6 +111,52 @@ test("the persistent engine rejects duplicate starts for its active session", as
   assert.equal(calls.filter(({ text }) => text === "First.").length, 1);
 });
 
+test("loading a prepared queue persists it without synthesizing or starting audio", async () => {
+  const repository = new MemoryRepository();
+  const calls = [];
+  const { audio, engine } = makeEngine(repository, calls);
+  const prepared = { ...session(), queuePrepared: true, queueVersion: "queue-v1" };
+
+  const response = await engine.handleCommand({ command: "replace", session: prepared });
+  assert.equal(response.snapshot.status, "text-ready");
+  assert.deepEqual(response.snapshot.chunks, prepared.chunks);
+  assert.equal(engine.activeSession.queuePrepared, true);
+  assert.equal(repository.sessions.get(prepared.id).queueVersion, "queue-v1");
+  assert.equal(audio.playCount, 0);
+  assert.deepEqual(calls, []);
+});
+
+test("the persistent engine refuses to play an editor draft that was never loaded into the queue", async () => {
+  const repository = new MemoryRepository();
+  const calls = [];
+  const { audio, engine } = makeEngine(repository, calls);
+
+  await assert.rejects(
+    engine.handleCommand({ command: "start", session: { ...session(), queuePrepared: false } }),
+    /cola preparada/
+  );
+  assert.equal(audio.playCount, 0);
+  assert.deepEqual(calls, []);
+});
+
+test("restoring a prepared queue never autoplays and reconnecting the same session does not reset it", async () => {
+  const repository = new MemoryRepository();
+  const { audio, engine } = makeEngine(repository);
+  const prepared = { ...session(), status: "paused", position: 1.5, queuePrepared: true };
+
+  const restored = await engine.handleCommand({ command: "restore", session: prepared });
+  assert.equal(restored.snapshot.status, "paused");
+  assert.equal(restored.snapshot.currentTime, 1.5);
+  assert.equal(audio.playCount, 0);
+
+  engine.player.state.selectedIndex = 1;
+  engine.player.state.currentTime = 2.25;
+  const reconnected = await engine.handleCommand({ command: "restore", session: prepared });
+  assert.equal(reconnected.snapshot.selectedIndex, 1);
+  assert.equal(reconnected.snapshot.currentTime, 2.25);
+  assert.equal(audio.playCount, 0);
+});
+
 test("forgetting a deleted session fences late synthesis writes from restoring its record or WAV", async () => {
   const repository = new MemoryRepository();
   let finishSynthesis;

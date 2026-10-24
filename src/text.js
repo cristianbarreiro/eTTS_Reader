@@ -19,9 +19,15 @@ export function splitText(text, maxChars = 430) {
   const paragraphs = normalized.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
   const chunks = [];
   let current = "";
-  const flush = () => { if (current.trim()) chunks.push(current.trim()); current = ""; };
+  let currentParagraphIndex = -1;
+  const flush = () => {
+    if (current.trim()) chunks.push(current.trim());
+    current = "";
+    currentParagraphIndex = -1;
+  };
 
-  for (const paragraph of paragraphs) {
+  for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex++) {
+    const paragraph = paragraphs[paragraphIndex];
     const sentences = paragraph.match(/[^.!?。！？]+[.!?。！？]?/g) || [paragraph];
     for (const raw of sentences) {
       const sentence = raw.trim();
@@ -29,11 +35,22 @@ export function splitText(text, maxChars = 430) {
       if (sentence.length > maxChars) {
         flush();
         for (let start = 0; start < sentence.length; start += maxChars) chunks.push(sentence.slice(start, start + maxChars));
-      } else if (!current) current = sentence;
-      else if (current.length + sentence.length + 1 <= maxChars) current += ` ${sentence}`;
-      else { flush(); current = sentence; }
+      } else if (!current) {
+        current = sentence;
+        currentParagraphIndex = paragraphIndex;
+      } else {
+        const separator = currentParagraphIndex === paragraphIndex ? " " : "\n\n";
+        if (current.length + separator.length + sentence.length <= maxChars) {
+          current += `${separator}${sentence}`;
+          currentParagraphIndex = paragraphIndex;
+        } else {
+          flush();
+          current = sentence;
+          currentParagraphIndex = paragraphIndex;
+        }
+      }
     }
-    flush();
   }
+  flush();
   return chunks;
 }

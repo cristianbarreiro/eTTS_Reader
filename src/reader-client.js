@@ -1,3 +1,5 @@
+import { getVoiceProvider } from "./voice-catalog.js";
+
 function snapshotFromSession(session = null) {
   const chunks = Array.isArray(session?.chunks) ? [...session.chunks] : [];
   const index = Math.max(0, Math.min(Number(session?.selectedIndex) || 0, Math.max(0, chunks.length - 1)));
@@ -19,6 +21,8 @@ function snapshotFromSession(session = null) {
     duration: durations[index] ?? null,
     speed: Number(session?.speed) || 1,
     chunkStates: Array.isArray(session?.chunkStates) ? [...session.chunkStates] : chunks.map((_, chunkIndex) => session?.audioKeys?.[chunkIndex] ? "ready" : "pending"),
+    activeProvider: chunks.length ? session?.voiceProvider || getVoiceProvider(session?.voice || session?.voiceId) : null,
+    activeVoiceId: chunks.length ? session?.voice || session?.voiceId || null : null,
     message: status === "interrupted"
       ? "La lectura se interrumpió. Pulsa Reanudar para continuar."
       : status === "error" ? String(session?.lastError || "La sesión guardada requiere reintento.") : "",
@@ -83,7 +87,7 @@ export class ReaderClient {
 
   async connect(session) {
     this.setSession(session);
-    const response = await this.request("status");
+    const response = await this.request("restore", { session });
     if (response.sessionId && response.sessionId === session?.id && response.snapshot) {
       this.state = { ...response.snapshot, currentAudioKey: response.currentAudioKey || null, downloadUrl: null };
       this.onState(this.snapshot());

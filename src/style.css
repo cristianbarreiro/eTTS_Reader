@@ -71,6 +71,10 @@ textarea { display: block; width: 100%; min-height: 150px; max-height: 320px; re
 textarea::placeholder { color: #8191a5; }
 textarea[readonly] { min-height: 96px; max-height: 170px; resize: vertical; background: var(--surface-soft); }
 .text-actions { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 10px; }
+.load-player-button { flex: 0 0 auto; min-height: 32px; padding: 6px 9px; white-space: nowrap; }
+.queue-sync-status { min-height: 14px; margin: 1px 1px 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.queue-sync-status[data-state="current"] { color: #9bc6ff; }
+.queue-sync-status[data-state="stale"], .queue-sync-status[data-state="error"] { color: #f2c879; }
 #chunk-count { font-size: 11px; font-variant-numeric: tabular-nums; }
 .text-button { min-height: 32px; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--accent); font-size: 11px; font-weight: 600; text-align: left; }
 .text-button:hover:not(:disabled) { background: #1d2d41; color: var(--accent-strong); }
@@ -231,6 +235,8 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
   .source-header { align-items: flex-start; }
   .source-status-row { flex-wrap: wrap; }
   .voice-grid { grid-template-columns: minmax(0, 1fr) minmax(78px, .45fr); }
+  .text-actions { gap: 6px; }
+  .load-player-button { padding: 6px 7px; font-size: 10px; }
   .test-voice { grid-column: 1 / -1; width: 100%; }
   .player-heading-meta { gap: 6px; }
   .player-state { max-width: 92px; }

@@ -57,6 +57,9 @@ export function userFacingErrorMessage(error, action = "general") {
   if (/permission|denied|not allowed/i.test(detail)) {
     return "Edge no concedió el acceso necesario. Revisa el permiso e inténtalo de nuevo.";
   }
+  if (/SpeechSynthesis:\s*(?:synthesis-failed|voice-unavailable|language-unavailable|network)/i.test(detail)) {
+    return "Edge no pudo generar audio con la voz seleccionada. Comprueba la conexión si es una voz en línea o prueba una voz local de Edge/Windows o Kokoro.";
+  }
   if (action === "model") return "No se pudo preparar Kokoro local. Tus documentos y sesiones siguen guardados; puedes reintentar.";
   if (action === "file") return "No se pudo procesar el documento. Comprueba que el archivo sea válido e inténtalo de nuevo.";
   if (action === "playback") return "No se pudo iniciar la reproducción. Comprueba la voz seleccionada e inténtalo de nuevo.";

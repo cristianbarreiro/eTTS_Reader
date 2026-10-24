@@ -33,7 +33,7 @@ test("restored active work is reported as interrupted and keeps its saved positi
 });
 
 test("reopening reconnects to an active audio session without issuing another play", async () => {
-  const runtime = fakeRuntime(async ({ command }) => command === "status" ? {
+  const runtime = fakeRuntime(async ({ command }) => command === "restore" ? {
     ok: true,
     sessionId: "session-1",
     currentAudioKey: "audio-current",
@@ -43,10 +43,25 @@ test("reopening reconnects to an active audio session without issuing another pl
   const client = new ReaderClient({ runtime, onState: (state) => updates.push(state.status) });
   await client.connect({ id: "session-1", chunks: ["Read."], sourceText: "Read.", status: "playing", audioKeys: [] });
 
-  assert.deepEqual(runtime.messages.map((message) => message.command), ["status"]);
+  assert.deepEqual(runtime.messages.map((message) => message.command), ["restore"]);
   assert.equal(client.snapshot().status, "playing");
   assert.equal(client.snapshot().currentAudioKey, "audio-current");
   assert.ok(updates.includes("playing"));
+  client.dispose();
+});
+
+test("loading a queue sends replace without sending a play command", async () => {
+  const runtime = fakeRuntime(async ({ command, payload }) => command === "replace" ? {
+    ok: true, sessionId: payload.session.id,
+    snapshot: { chunks: payload.session.chunks, status: "text-ready", selectedIndex: 0, speed: 1, durations: [null], activeKind: "chunk" }
+  } : { ok: true });
+  const client = new ReaderClient({ runtime });
+  const session = { id: "session-load", sourceText: "Read.", chunks: ["Read."], status: "text-ready", queuePrepared: true, voice: "af_heart" };
+
+  await client.replace(session);
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["replace"]);
+  assert.equal(client.snapshot().status, "text-ready");
+  assert.equal(client.session.queuePrepared, true);
   client.dispose();
 });
 

@@ -10,8 +10,9 @@ import { getVoiceProvider, isSystemVoiceId, voiceSessionFields } from "./voice-c
 import { SystemSpeechProvider } from "./system-speech.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
-import { kokoroEngineLabel, playerHeaderState, readingProgressCaption } from "./player-presentation.js";
+import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "./player-presentation.js";
 import { createTabFaviconPresenter, safeTabTitle } from "./tab-card-presentation.js";
+import { playbackQueueMatchesEditor, preparePlaybackQueue } from "./playback-queue.js";
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
@@ -19,6 +20,7 @@ const ui = {
   fileStatus: $("#file-status"), drop: $("#dropzone"), chooseSourceFile: $("#choose-source-file"), retryFileAccess: $("#retry-file-access"),
   library: $("#library-details"), librarySummary: $("#library-summary-count"), libraryList: $("#library-list"),
   libraryStatus: $("#library-status"),
+  loadPlayer: $("#load-player"), queueSyncStatus: $("#queue-sync-status"),
   appAlert: $("#app-alert"), appAlertMessage: $("#app-alert-message"), errorDetails: $("#app-error-details"), errorTechnical: $("#app-error-technical"), dismissAppAlert: $("#dismiss-app-alert"),
   sourceCard: $("#source-card"), activeTabKind: $("#active-tab-kind"), activeTabDomain: $("#active-tab-domain"),
   activeTabFavicon: $("#active-tab-favicon"), activeTabFaviconFallback: $("#active-tab-favicon-fallback"),
@@ -54,13 +56,15 @@ let downloadObjectUrl = null;
 let downloadAudioKey = null;
 let hydrationComplete = false;
 let editingForked = false;
-let pendingQueueReplacement = false;
 let pendingTabImport = null;
 let tabImportBusy = false;
 let currentTabContext = null;
 let activeImportOperation = 0;
 let followChangeSequence = 0;
 let fileSelectionPurpose = "document";
+let queueLoadBusy = false;
+let staleQueueStopPending = false;
+let staleQueueStopPromise = null;
 let systemVoices = [];
 const systemVoiceCatalog = new SystemSpeechProvider();
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -68,16 +72,18 @@ const panelStatus = createPanelStatusState();
 
 const player = new ReaderClient({
   onState: (snapshot) => {
-    if (currentSession && snapshot.activeKind !== "preview" && player?.session?.id === currentSession.id) {
-      currentSession = {
-        ...currentSession,
+    if (snapshot.activeKind !== "preview" && player?.session?.id) {
+      const loadedSession = {
+        ...player.session,
         selectedIndex: snapshot.selectedIndex,
         position: snapshot.currentTime,
         status: snapshot.status,
         speed: snapshot.speed,
-        audioKeys: [...(currentSession.audioKeys || [])]
+        audioKeys: [...(player.session.audioKeys || [])]
       };
-      if (snapshot.currentAudioKey) currentSession.audioKeys[snapshot.selectedIndex] = snapshot.currentAudioKey;
+      if (snapshot.currentAudioKey) loadedSession.audioKeys[snapshot.selectedIndex] = snapshot.currentAudioKey;
+      player.session = loadedSession;
+      if (currentSession?.id === loadedSession.id) currentSession = loadedSession;
     }
     renderPlayer(snapshot);
     if (snapshot.status === "error" && snapshot.message) showError(snapshot.message, "playback");
@@ -95,22 +101,61 @@ function syncImportButtons() {
 
 function setContentBusy(busy) {
   ui.library.setAttribute("aria-busy", String(busy));
-  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed]) {
+  for (const control of [ui.text, ui.file, ui.chooseSourceFile, ui.retryFileAccess, ui.clearText, ui.replaceImport, ui.appendImport, ui.cancelImport, ui.voice, ui.speed, ui.loadPlayer]) {
     if (control) control.disabled = busy;
   }
   syncImportButtons();
   for (const button of ui.library.querySelectorAll("button")) button.disabled = busy;
+  updateQueueSyncUI();
+}
+
+function updateQueueSyncUI(override = "") {
+  if (!ui.queueSyncStatus) return;
+  const hasText = Boolean(ui.text.value.trim());
+  const queue = player?.session;
+  const matches = currentQueueMatchesEditor();
+  let message = override;
+  let state = override ? "error" : "empty";
+  if (!override && queueLoadBusy) {
+    message = "Preparando la cola de reproducción…";
+    state = "loading";
+  } else if (!override && matches) {
+    message = getVoiceProvider(queue.voice || queue.voiceId) === "speechSynthesis"
+      ? "Cola cargada · SpeechSynthesis se iniciará al reproducir."
+      : "Cola cargada · el primer audio se generará al reproducir.";
+    state = "current";
+  } else if (!override && queue?.id) {
+    message = "El reproductor conserva una cola anterior. Carga el texto actual antes de reproducir.";
+    state = "stale";
+  } else if (!override && hasText) {
+    message = "El texto está en el editor. Cárgalo para preparar la cola.";
+    state = "ready";
+  } else if (!override) {
+    message = "Escribe o importa texto y cárgalo cuando quieras preparar la cola.";
+    state = "empty";
+  }
+  ui.queueSyncStatus.textContent = message;
+  ui.queueSyncStatus.dataset.state = state;
+  ui.loadPlayer.disabled = !hasText || libraryMutationBusy || queueLoadBusy;
 }
 
 function controlsModelState() { return modelState; }
+function currentQueueMatchesEditor() {
+  return playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value });
+}
+
 function readerControls(snapshot = player.snapshot()) {
-  const isCurrentSpeech = snapshot.activeProvider === "speechSynthesis" && ["playing", "paused", "audio-ready"].includes(snapshot.status);
-  const voiceId = isCurrentSpeech ? snapshot.activeVoiceId : ui.voice.value;
+  const isCurrentSpeech = snapshot.activeProvider === "speechSynthesis" && ["starting", "playing", "paused", "audio-ready"].includes(snapshot.status);
+  const voiceId = ui.voice.value;
   const provider = getVoiceProvider(voiceId);
-  return deriveReaderControls(controlsModelState(), snapshot.chunks.length, snapshot.status === "playing", {
+  const queueMatches = snapshot.activeKind === "preview" || currentQueueMatchesEditor();
+  const queueChunkCount = queueMatches ? snapshot.chunks.length : 0;
+  return deriveReaderControls(controlsModelState(), queueChunkCount, snapshot.status === "playing", {
     provider,
-    systemVoiceAvailable: provider === "speechSynthesis" && (isCurrentSpeech || systemVoices.some((voice) => voice.id === voiceId)),
-    audioAvailable: provider === "kokoro" && Boolean(snapshot.currentAudioKey || currentSession?.audioKeys?.[snapshot.selectedIndex])
+    systemVoiceAvailable: provider === "speechSynthesis" && (systemVoices.some((voice) => voice.id === voiceId)
+      || isCurrentSpeech && snapshot.activeVoiceId === voiceId),
+    audioAvailable: provider === "kokoro" && queueMatches && Boolean(snapshot.currentAudioKey || player.session?.audioKeys?.[snapshot.selectedIndex]),
+    allowLazyInitialization: provider === "kokoro" && queueMatches
   });
 }
 
@@ -157,6 +202,13 @@ function modelLabel() {
 }
 
 function describePlayer(snapshot) {
+  if (snapshot.status === "text-ready" && modelState === "loading" && snapshot.activeProvider !== "speechSynthesis") {
+    return "Preparando Kokoro local antes de generar el primer audio.";
+  }
+  if (snapshot.status === "text-ready" && snapshot.chunks.length) return snapshot.activeProvider === "speechSynthesis"
+    ? "Cola preparada. La voz del sistema se iniciará al reproducir."
+    : "Cola preparada. El primer audio se generará al reproducir.";
+  if (snapshot.status === "starting") return "Esperando la confirmación de inicio del proveedor de voz.";
   if (snapshot.status === "playing") {
     if (snapshot.activeProvider === "speechSynthesis") return snapshot.activeKind === "preview"
       ? "Muestra de Edge/Windows; no genera un WAV descargable."
@@ -187,7 +239,7 @@ function renderPlayer(snapshot) {
   const controls = readerControls(snapshot);
   const selected = hasText ? snapshot.selectedIndex + 1 : 0;
   const isPlaying = snapshot.status === "playing";
-  const isGenerating = snapshot.status === "generating";
+  const isGenerating = ["generating", "starting"].includes(snapshot.status);
   const activeProvider = snapshot.activeProvider || getVoiceProvider(ui.voice.value);
   const usesSystemSpeech = activeProvider === "speechSynthesis";
 
@@ -211,19 +263,14 @@ function renderPlayer(snapshot) {
   ui.seek.max = String(usesSystemSpeech ? 0 : snapshot.duration || 0);
   ui.seek.step = "0.1";
   ui.seek.value = String(usesSystemSpeech ? 0 : Math.min(snapshot.currentTime, snapshot.duration || 0));
-  ui.seek.disabled = usesSystemSpeech || !Number.isFinite(snapshot.duration) || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
+  const queueMatchesEditor = snapshot.activeKind === "preview" || currentQueueMatchesEditor();
+  ui.seek.disabled = !queueMatchesEditor || usesSystemSpeech || !Number.isFinite(snapshot.duration)
+    || snapshot.duration <= 0 || !["playing", "paused"].includes(snapshot.status);
   ui.seek.setAttribute("aria-valuetext", usesSystemSpeech
     ? "La voz del sistema no informa posición temporal para buscar."
     : `Fragmento ${selected}, ${formatTime(snapshot.currentTime)} de ${formatTime(snapshot.duration ?? Number.NaN)}`);
 
-  const knownSeconds = snapshot.durations.reduce((sum, duration) => sum + (Number.isFinite(duration) ? duration : 0), 0);
-  ui.durationSummary.textContent = usesSystemSpeech
-    ? "La duración y la búsqueda temporal no están disponibles para voces del sistema."
-    : snapshot.activeKind === "preview" ? `Duración de la muestra ${formatTime(snapshot.duration)}`
-    : snapshot.totalDuration !== null
-    ? `Duración total ${formatTime(snapshot.totalDuration)} · ${snapshot.knownDurationCount} fragmentos medidos`
-    : hasText ? `Duración conocida ${formatTime(knownSeconds)} · total pendiente (${snapshot.knownDurationCount}/${chunkCount} fragmentos medidos)`
-      : "La duración aparecerá cuando se genere audio.";
+  ui.durationSummary.textContent = readingDurationSummary(snapshot, activeProvider);
 
   ui.play.hidden = isPlaying;
   ui.pause.hidden = !isPlaying;
@@ -232,13 +279,18 @@ function renderPlayer(snapshot) {
   ui.pause.disabled = !controls.canPause;
   ui.play.setAttribute("aria-label", snapshot.status === "paused" || snapshot.status === "interrupted" ? "Reanudar lectura"
     : snapshot.status === "completed" ? "Reproducir lectura desde el principio" : "Reproducir lectura");
-  ui.stop.disabled = !(hasText || snapshot.activeKind === "preview") || !["playing", "paused", "generating", "audio-ready", "completed", "interrupted", "error"].includes(snapshot.status);
+  ui.stop.disabled = !(hasText || snapshot.activeKind === "preview") || !["playing", "starting", "paused", "generating", "audio-ready", "completed", "interrupted", "error"].includes(snapshot.status);
   ui.previous.disabled = snapshot.activeKind === "preview" || !controls.canPlay || snapshot.selectedIndex <= 0;
   ui.next.disabled = snapshot.activeKind === "preview" || !controls.canPlay || snapshot.selectedIndex >= chunkCount - 1;
   ui.test.disabled = !controls.canTestVoice || isPlaying || isGenerating;
 
-  const message = describePlayer(snapshot) || (hasText ? "El texto está listo para reproducirse." : "Pega o carga texto para empezar.");
+  const staleQueue = snapshot.activeKind !== "preview" && !currentQueueMatchesEditor();
+  const message = staleQueue
+    ? player.session?.id ? "El texto del editor cambió. Carga el contenido actual antes de iniciar la reproducción."
+      : "Carga el texto al reproductor para preparar la lectura."
+    : describePlayer(snapshot) || (hasText ? "La cola está lista para reproducirse." : "Pega o carga texto para empezar.");
   if (ui.playbackStatus.textContent !== message) ui.playbackStatus.textContent = message;
+  updateQueueSyncUI();
 }
 
 async function refreshDownloadLink(audioKey) {
@@ -354,18 +406,23 @@ function updateTextInfo() {
   const segments = splitText(text);
   ui.count.textContent = `${text.length.toLocaleString()} caracteres`;
   ui.chunks.textContent = `${segments.length} ${segments.length === 1 ? "fragmento" : "fragmentos"}`;
-  if (!currentSession || currentSession.sourceText !== text) {
-    const liveStatus = player.snapshot().status;
-    const stopEmptyingRead = !segments.length && ["playing", "generating", "audio-ready"].includes(liveStatus);
+  if (!currentSession || currentSession.sourceText !== text
+      || (currentSession.voice || currentSession.voiceId) !== ui.voice.value) {
+    const snapshot = player.snapshot();
+    const loadedSession = player.session;
+    const changesLoadedQueue = Boolean(loadedSession?.id && currentSession?.id === loadedSession.id
+      && (loadedSession.sourceText !== text || (loadedSession.voice || loadedSession.voiceId) !== ui.voice.value));
     if (currentSession && !editingForked
-        && (currentSession.status !== "text-ready" || currentSession.audioKeys?.some(Boolean)
-          || ["playing", "paused", "interrupted", "completed", "error"].includes(liveStatus)
-          || Boolean(player.snapshot().currentAudioKey))) {
+        && (changesLoadedQueue || currentSession.status !== "text-ready" || currentSession.audioKeys?.some(Boolean)
+          || ["playing", "paused", "interrupted", "completed", "error"].includes(snapshot.status)
+          || Boolean(snapshot.currentAudioKey))) {
       currentSession = {
         id: makeId("session"), documentId: currentDocument?.id,
         sourceDocumentName: currentDocument?.name || "Texto pegado",
         sourceText: text, chunks: segments, selectedIndex: 0, position: 0,
-        status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
+        status: segments.length ? "text-ready" : "empty", ...voiceSessionFields(ui.voice.value),
+        speed: Number(ui.speed.value), audioKeys: [], chunkStates: segments.map(() => "pending"),
+        durations: segments.map(() => null), queuePrepared: false
       };
       editingForked = true;
     } else {
@@ -378,24 +435,34 @@ function updateTextInfo() {
         selectedIndex: 0,
         position: 0,
         status: segments.length ? "text-ready" : "empty",
-        voice: ui.voice.value,
+        ...voiceSessionFields(ui.voice.value),
         speed: Number(ui.speed.value),
-        audioKeys: []
+        audioKeys: [], chunkStates: segments.map(() => "pending"),
+        durations: segments.map(() => null), queuePrepared: false
       };
     }
-    player.setSession(currentSession);
-    if (stopEmptyingRead) void player.stop().catch(showError);
-    if (hydrationComplete) queuePersistence(true);
+    if (changesLoadedQueue && snapshot.activeKind !== "preview"
+        && ["playing", "starting", "generating", "audio-ready"].includes(snapshot.status)
+        && !staleQueueStopPending) {
+      staleQueueStopPending = true;
+      staleQueueStopPromise = player.stop().catch(showError).finally(() => {
+        staleQueueStopPending = false;
+        staleQueueStopPromise = null;
+      });
+      void staleQueueStopPromise;
+    }
+    if (hydrationComplete) queuePersistence(false);
   }
+  updateQueueSyncUI();
+  renderPlayer(player.snapshot());
 }
 
-function queuePersistence(replaceQueue = false) {
-  pendingQueueReplacement ||= replaceQueue;
+function queuePersistence() {
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => { void flushPersistence(); }, 250);
 }
 
-function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
+function flushPersistence() {
   clearTimeout(persistTimer);
   const text = ui.text.value;
   // An empty editor is an unsaved draft. It must never overwrite a saved
@@ -413,7 +480,11 @@ function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
     sourceDocumentName: currentDocument.name || currentSession.sourceDocumentName || "Texto pegado",
     chunks: splitText(ui.text.value),
     voice: ui.voice.value,
-    speed: Number(ui.speed.value)
+    ...voiceSessionFields(ui.voice.value),
+    speed: Number(ui.speed.value),
+    queuePrepared: currentSession.queuePrepared !== false
+      && currentSession.sourceText === text
+      && (currentSession.voice || currentSession.voiceId) === ui.voice.value
   };
   const generation = selectionEpoch;
   persistenceChain = persistenceChain.then(async () => {
@@ -425,19 +496,95 @@ function flushPersistence({ replaceQueue = pendingQueueReplacement } = {}) {
     currentDocument = saved.document;
     currentSession = saved.session;
     await chrome.storage.local.set({ lastDocumentId: currentDocument.id, lastSessionId: currentSession.id });
-    if (replaceQueue) {
-      await player.replace(currentSession).catch((error) => {
-        const message = showError(error, "playback");
-        ui.playbackStatus.textContent = `El texto quedó guardado, pero la cola no se actualizó. ${message}`;
-      });
-      pendingQueueReplacement = false;
-    }
     if (ui.library.open) await refreshLibrary();
     await refreshStorageUsage();
   }).catch((error) => {
     ui.fileStatus.textContent = showError(error, "storage");
   });
   return persistenceChain;
+}
+
+async function loadEditorToPlayer() {
+  updateTextInfo();
+  const text = String(ui.text.value ?? "");
+  const chunks = splitText(text);
+  const voice = ui.voice.value;
+  if (!text.trim() || !chunks.length) {
+    updateQueueSyncUI("Escribe o importa texto antes de cargarlo al reproductor.");
+    return false;
+  }
+  if (queueLoadBusy || libraryMutationBusy) return false;
+
+  let previousQueue = player.session ? { ...player.session } : null;
+  let loadFailure = "";
+  queueLoadBusy = true;
+  setContentBusy(true);
+  updateQueueSyncUI();
+  try {
+    if (staleQueueStopPromise) await staleQueueStopPromise;
+    if (["playing", "starting", "generating", "audio-ready"].includes(player.snapshot().status)) {
+      await player.stop();
+    }
+    previousQueue = player.session ? { ...player.session } : null;
+    // System voices are checked in the same offscreen provider used by playback.
+    // Kokoro stays lazy: loading text never downloads the model or synthesizes audio.
+    if (isSystemVoiceId(voice)) await player.initialize(voice);
+    await flushPersistence();
+    const prepared = preparePlaybackQueue({
+      editorSession: currentSession,
+      loadedSession: player.session,
+      text,
+      chunks,
+      voice,
+      speed: Number(ui.speed.value),
+      makeId,
+      now: () => Date.now()
+    });
+    await player.replace(prepared);
+    currentSession = player.session || prepared;
+    editingForked = false;
+    await chrome.storage.local.set({
+      ...(currentDocument?.id ? { lastDocumentId: currentDocument.id } : {}),
+      lastSessionId: currentSession.id
+    });
+    ui.queueSyncStatus.textContent = isSystemVoiceId(voice)
+      ? "Cola cargada · SpeechSynthesis se iniciará al reproducir."
+      : "Cola cargada · el primer audio se generará al reproducir.";
+    ui.queueSyncStatus.dataset.state = "current";
+    if (ui.library.open) await refreshLibrary();
+    await refreshStorageUsage();
+    return true;
+  } catch (error) {
+    player.setSession(previousQueue);
+    const message = showError(error, isSystemVoiceId(voice) ? "voice" : "playback");
+    loadFailure = `No se pudo cargar la cola. ${message}`;
+    return false;
+  } finally {
+    queueLoadBusy = false;
+    setContentBusy(false);
+    updateQueueSyncUI(loadFailure);
+  }
+}
+
+async function startCurrentPlayback() {
+  updateTextInfo();
+  if (!playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) {
+    updateQueueSyncUI("Carga el texto actual al reproductor antes de iniciar la lectura.");
+    return false;
+  }
+  const queue = player.session;
+  const voice = queue.voice || queue.voiceId;
+  const provider = getVoiceProvider(voice);
+  const hasCachedAudio = Boolean(queue.audioKeys?.[player.snapshot().selectedIndex]);
+  if (provider === "kokoro" && !hasCachedAudio && modelState !== "ready") {
+    if (!["idle", "cached"].includes(modelState)) return false;
+    const initialized = await initializeModel();
+    if (!initialized || player.session?.id !== queue.id
+        || !playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) return false;
+  }
+  if (!playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) return false;
+  await player.play();
+  return true;
 }
 
 async function refreshLibrary() {
@@ -525,7 +672,7 @@ async function refreshLibrary() {
         resume.type = "button";
         resume.className = "library-open";
         resume.textContent = "Reanudar";
-        resume.addEventListener("click", () => { if (!libraryMutationBusy) void resumeLibrarySession(session, activateSession, () => player.play()).catch(showError); });
+        resume.addEventListener("click", () => { if (!libraryMutationBusy) void resumeLibrarySession(session, activateSession, startCurrentPlayback).catch(showError); });
         const deleteSession = document.createElement("button");
         deleteSession.type = "button";
         deleteSession.className = "library-delete";
@@ -571,12 +718,11 @@ async function refreshLibrary() {
       },
       onContinue: () => {
         if (libraryMutationBusy) return;
-        if (matchingSession) void resumeLibrarySession(matchingSession, activateSession, () => player.play()).catch(showError);
+        if (matchingSession) void resumeLibrarySession(matchingSession, activateSession, startCurrentPlayback).catch(showError);
         else void (async () => {
           if (document) await activateDocument(document, null, false, { restoreSession: false });
           else if (latestSession) await activateSession(latestSession);
-          await flushPersistence();
-          await player.play();
+          if (await loadEditorToPlayer()) await startCurrentPlayback();
         })().catch(showError);
       },
       onDelete: (event) => {
@@ -836,7 +982,7 @@ async function acceptTabImport(mode) {
       session = await repository.saveSession({
         id: makeId("session"), documentId: document.id, sourceDocumentName: document.name, sourceText: finalText, chunks: splitText(finalText),
         selectedIndex: 0, position: 0, status: "text-ready", voice: ui.voice.value,
-        speed: Number(ui.speed.value), audioKeys: []
+        speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false
       });
     } catch (error) {
       await repository.deleteDocument(document.id).catch(() => {});
@@ -848,7 +994,7 @@ async function acceptTabImport(mode) {
     editingForked = false;
     ui.text.value = finalText;
     ui.fileStatus.textContent = `${document.name} · ${finalText.length.toLocaleString()} caracteres · guardado localmente.`;
-    player.setSession(currentSession);
+    player.setSession(null);
     hydrationComplete = true;
     updateTextInfo();
     pendingTabImport = null;
@@ -930,7 +1076,7 @@ async function initializeModel() {
 
 async function suspendCurrentReadForSwitch() {
   const status = player.snapshot().status;
-  if (status === "playing") await player.pause().catch(() => {});
+  if (["playing", "starting"].includes(status)) await player.pause().catch(() => {});
   else if (["generating", "audio-ready"].includes(status)) await player.stop().catch(() => {});
 }
 
@@ -941,12 +1087,12 @@ async function createNewDraft() {
   currentDocument = null;
   currentSession = {
     id: null, documentId: null, sourceDocumentName: "Texto pegado", sourceText: "", chunks: [], selectedIndex: 0,
-    position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
+    position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false
   };
   editingForked = false;
   ui.text.value = "";
   ui.fileStatus.textContent = "Editor vacío; los documentos anteriores siguen guardados.";
-  player.setSession(currentSession);
+  player.setSession(null);
   await chrome.storage.local.remove(["lastDocumentId", "lastSessionId"]);
   hydrationComplete = true;
   if (ui.library.open) await refreshLibrary();
@@ -962,27 +1108,32 @@ async function activateDocument(document, preferredSessionId = null, internal = 
   selectionEpoch++;
   currentDocument = document;
   const sessions = await repository.listSessions(document.id);
-  const savedSession = sessions.find((item) => item.id === preferredSessionId) || sessions[0] || null;
+  const savedSession = restoreSession
+    ? sessions.find((item) => item.id === preferredSessionId) || sessions[0] || null
+    : null;
   const editorText = restoreSession ? (savedSession?.sourceText ?? document.text) : document.text;
   const canUseSavedSession = savedSession && savedSession.sourceText === editorText;
   currentSession = canUseSavedSession ? savedSession : {
     id: null, documentId: document.id, sourceDocumentName: document.name, sourceText: editorText, chunks: splitText(editorText),
     selectedIndex: 0, position: 0, status: editorText.trim() ? "text-ready" : "empty",
-    voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
+    voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false
   };
   editingForked = false;
   ui.text.value = editorText;
   selectVoice(currentSession.voiceId || currentSession.voice);
   if (currentSession.speed && [...ui.speed.options].some((option) => Number(option.value) === Number(currentSession.speed))) ui.speed.value = String(currentSession.speed);
   ui.fileStatus.textContent = document.name ? `Documento guardado · ${document.name}` : "Texto local recuperado.";
-  player.setSession(currentSession);
   const preference = { lastDocumentId: document.id };
   if (currentSession.id) preference.lastSessionId = currentSession.id;
   else await chrome.storage.local.remove("lastSessionId");
   await chrome.storage.local.set(preference);
   hydrationComplete = true;
+  if (currentSession.id && currentSession.queuePrepared !== false && currentSession.chunks?.length) {
+    await player.connect(currentSession);
+  } else {
+    player.setSession(null);
+  }
   updateTextInfo();
-  await player.connect(currentSession);
   if (ui.library.open) await refreshLibrary();
   await refreshStorageUsage();
   } finally {
@@ -1015,6 +1166,26 @@ async function activateSession(session, internal = false, { skipFlush = false } 
       selected = { ...selected, documentId: null };
     }
   }
+  const sessionText = String(selected.sourceText || document?.text || "");
+  if (sessionText.trim()) {
+    const preparedSession = preparePlaybackQueue({
+      editorSession: selected,
+      loadedSession: null,
+      text: sessionText,
+      chunks: splitText(sessionText),
+      voice: selected.voice || selected.voiceId || ui.voice.value,
+      speed: Number(selected.speed) || Number(ui.speed.value),
+      makeId,
+      now: () => Date.now()
+    });
+    selected = {
+      ...preparedSession,
+      status: selected.queuePrepared === false ? "text-ready" : selected.status || "text-ready"
+    };
+    selected = await repository.saveSession(selected);
+  } else {
+    selected = { ...selected, queuePrepared: false };
+  }
   currentDocument = document;
   currentSession = selected;
   editingForked = false;
@@ -1022,15 +1193,18 @@ async function activateSession(session, internal = false, { skipFlush = false } 
   selectVoice(selected.voiceId || selected.voice);
   if ([...ui.speed.options].some((option) => Number(option.value) === Number(selected.speed))) ui.speed.value = String(selected.speed);
   ui.fileStatus.textContent = `Sesión recuperada · ${selected.sourceDocumentName || document?.name || "lectura guardada"}`;
-  player.setSession(currentSession);
   if (document) await chrome.storage.local.set({ lastDocumentId: document.id, lastSessionId: currentSession.id });
   else {
     await chrome.storage.local.remove("lastDocumentId");
     await chrome.storage.local.set({ lastSessionId: currentSession.id });
   }
   hydrationComplete = true;
+  if (currentSession.queuePrepared !== false && currentSession.chunks?.length) {
+    await player.connect(currentSession);
+  } else {
+    player.setSession(null);
+  }
   updateTextInfo();
-  await player.connect(currentSession);
   if (ui.library.open) await refreshLibrary();
   } finally {
     if (!internal) {
@@ -1056,6 +1230,8 @@ async function deleteLibraryDocument(documentId) {
   setContentBusy(true);
   libraryRefreshEpoch++;
   const wasActive = currentDocument?.id === documentId;
+  const previousQueue = player.session ? { ...player.session } : null;
+  const wasLoadedQueue = dependentSessions.some((session) => session.id === previousQueue?.id);
   if (wasActive) selectionEpoch++;
   const previousDocument = currentDocument;
   const previousSession = currentSession;
@@ -1067,7 +1243,6 @@ async function deleteLibraryDocument(documentId) {
     ui.chooseSourceFile.disabled = true;
     await flushPersistence();
     clearTimeout(persistTimer);
-    pendingQueueReplacement = false;
     currentDocument = null;
     currentSession = null;
     ui.text.value = "";
@@ -1075,6 +1250,7 @@ async function deleteLibraryDocument(documentId) {
   }
   try {
     await Promise.all(dependentSessions.map((session) => player.forgetSession(session.id, true)));
+    if (wasLoadedQueue && !wasActive) player.setSession(null);
     documentDeleted = await repository.deleteDocument(documentId);
     if (!documentDeleted) throw new Error("El documento ya no existe en la biblioteca local.");
     if (wasActive) {
@@ -1090,8 +1266,12 @@ async function deleteLibraryDocument(documentId) {
     if (wasActive && !documentDeleted) {
       currentDocument = previousDocument;
       currentSession = previousSession;
-      player.setSession(currentSession);
-      if (currentSession) await player.connect(currentSession).catch(() => {});
+      if (previousQueue?.id && previousQueue.id !== currentSession?.id && previousQueue.queuePrepared !== false) {
+        await player.connect(previousQueue).catch(() => {});
+      } else if (currentSession?.id && currentSession.queuePrepared !== false) await player.connect(currentSession).catch(() => {});
+      else player.setSession(null);
+    } else if (!documentDeleted && wasLoadedQueue && previousQueue?.queuePrepared !== false) {
+      await player.connect(previousQueue).catch(() => {});
     } else if (wasActive) {
       currentDocument = null;
       currentSession = null;
@@ -1127,6 +1307,7 @@ async function deleteLibrarySession(sessionId) {
   setContentBusy(true);
   libraryRefreshEpoch++;
   const wasActive = currentSession?.id === sessionId;
+  const wasLoadedQueue = player.session?.id === sessionId;
   if (wasActive) selectionEpoch++;
   const document = currentDocument;
   const editorText = ui.text.value;
@@ -1134,10 +1315,9 @@ async function deleteLibrarySession(sessionId) {
     ui.text.disabled = true;
     await flushPersistence();
     clearTimeout(persistTimer);
-    pendingQueueReplacement = false;
     currentSession = null;
-    player.setSession(null);
   }
+  if (wasLoadedQueue) player.setSession(null);
   try {
     await player.forgetSession(sessionId, false);
     await repository.deleteSession(sessionId);
@@ -1148,13 +1328,13 @@ async function deleteLibrarySession(sessionId) {
         currentSession = {
           id: null, documentId: document.id, sourceDocumentName: document.name,
           sourceText: editorText, chunks: splitText(editorText), selectedIndex: 0, position: 0,
-          status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: []
+          status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false
         };
-        player.setSession(currentSession);
+        if (wasLoadedQueue) player.setSession(null);
         await chrome.storage.local.remove("lastSessionId");
       } else {
-        currentSession = { id: null, documentId: document.id, sourceDocumentName: document.name, sourceText: "", chunks: [], selectedIndex: 0, position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [] };
-        player.setSession(currentSession);
+        currentSession = { id: null, documentId: document.id, sourceDocumentName: document.name, sourceText: "", chunks: [], selectedIndex: 0, position: 0, status: "empty", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false };
+        if (wasLoadedQueue) player.setSession(null);
         await chrome.storage.local.remove("lastSessionId");
       }
     } else if (wasActive) {
@@ -1168,9 +1348,12 @@ async function deleteLibrarySession(sessionId) {
     if (wasActive) {
       currentSession = await repository.getSession(sessionId).catch(() => null);
       if (currentSession) {
-        player.setSession(currentSession);
-        await player.connect(currentSession).catch(() => {});
+        if (wasLoadedQueue && currentSession.queuePrepared !== false) await player.connect(currentSession).catch(() => {});
+        else if (wasLoadedQueue) player.setSession(null);
       }
+    } else if (wasLoadedQueue) {
+      const restoreQueue = await repository.getSession(sessionId).catch(() => null);
+      if (restoreQueue?.id && restoreQueue.queuePrepared !== false) await player.connect(restoreQueue).catch(() => {});
     }
   } finally {
     libraryMutationBusy = false;
@@ -1194,16 +1377,16 @@ async function deleteRecoveredLibraryEntry(entry) {
   libraryRefreshEpoch++;
   const deletedIds = new Set(sessions.map((session) => session.id));
   const wasActive = deletedIds.has(currentSession?.id);
+  const wasLoadedQueue = deletedIds.has(player.session?.id);
   const editorText = ui.text.value;
   if (wasActive) {
     selectionEpoch++;
     ui.text.disabled = true;
     await flushPersistence();
     clearTimeout(persistTimer);
-    pendingQueueReplacement = false;
     currentSession = null;
-    player.setSession(null);
   }
+  if (wasLoadedQueue) player.setSession(null);
   try {
     for (const session of sessions) {
       await player.forgetSession(session.id, false);
@@ -1211,12 +1394,10 @@ async function deleteRecoveredLibraryEntry(entry) {
     }
     if (wasActive) {
       if (currentDocument && editorText.trim()) {
-        currentSession = { id: null, documentId: currentDocument.id, sourceDocumentName: currentDocument.name, sourceText: editorText, chunks: splitText(editorText), selectedIndex: 0, position: 0, status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [] };
-        player.setSession(currentSession);
+        currentSession = { id: null, documentId: currentDocument.id, sourceDocumentName: currentDocument.name, sourceText: editorText, chunks: splitText(editorText), selectedIndex: 0, position: 0, status: "text-ready", voice: ui.voice.value, speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false };
         await chrome.storage.local.remove("lastSessionId");
       } else {
         currentSession = null;
-        player.setSession(null);
         await chrome.storage.local.remove("lastSessionId");
       }
     }
@@ -1224,6 +1405,15 @@ async function deleteRecoveredLibraryEntry(entry) {
     await refreshStorageUsage();
   } catch (error) {
     ui.libraryStatus.textContent = showError(error, "library");
+    if (wasLoadedQueue) {
+      for (const session of sessions) {
+        const restoreQueue = await repository.getSession(session.id).catch(() => null);
+        if (restoreQueue?.id && restoreQueue.queuePrepared !== false) {
+          await player.connect(restoreQueue).catch(() => {});
+          break;
+        }
+      }
+    }
   } finally {
     libraryMutationBusy = false;
     setContentBusy(false);
@@ -1384,12 +1574,12 @@ ui.file.addEventListener("change", async () => {
     currentSession = await repository.saveSession({
       id: makeId("session"), documentId: currentDocument.id, sourceDocumentName: currentDocument.name, sourceText: text, chunks: splitText(text),
       selectedIndex: 0, position: 0, status: "text-ready", voice: ui.voice.value,
-      speed: Number(ui.speed.value), audioKeys: []
+      speed: Number(ui.speed.value), audioKeys: [], queuePrepared: false
     });
     editingForked = false;
     ui.text.value = text;
     ui.fileStatus.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB · texto guardado localmente.`;
-    player.setSession(currentSession);
+    player.setSession(null);
     await chrome.storage.local.set({ lastDocumentId: currentDocument.id, lastSessionId: currentSession.id });
     hydrationComplete = true;
     updateTextInfo();
@@ -1439,21 +1629,23 @@ ui.drop.addEventListener("drop", (event) => {
   ui.file.dispatchEvent(new Event("change"));
 });
 
-ui.speed.addEventListener("input", () => { void player.setSpeed(Number(ui.speed.value)).catch(showError); });
+ui.speed.addEventListener("input", () => {
+  if (currentQueueMatchesEditor()) void player.setSpeed(Number(ui.speed.value)).catch(showError);
+});
 ui.speed.addEventListener("change", () => {
   if (currentSession) currentSession = { ...currentSession, speed: Number(ui.speed.value) };
   void chrome.storage.local.set({ speed: Number(ui.speed.value) });
   queuePersistence(false);
 });
 ui.voice.addEventListener("change", () => {
-  if (currentSession) currentSession = { ...currentSession, ...voiceSessionFields(ui.voice.value), audioKeys: [], durations: currentSession.chunks.map(() => null) };
   void chrome.storage.local.set({ lastVoice: ui.voice.value });
-  if (currentSession) void player.setVoice(ui.voice.value).catch(showError);
+  updateTextInfo();
   updateVoiceProviderUI();
   renderPlayer(player.snapshot());
   queuePersistence(false);
 });
 
+ui.loadPlayer.addEventListener("click", () => { void loadEditorToPlayer(); });
 ui.install.addEventListener("click", () => { void initializeModel(); });
 ui.refreshVoices.addEventListener("click", () => { void refreshSystemVoices(); });
 ui.test.addEventListener("click", () => {
@@ -1461,8 +1653,7 @@ ui.test.addEventListener("click", () => {
   void player.preview(ui.voice.value).catch(showError);
 });
 ui.play.addEventListener("click", () => {
-  if (!readerControls().canPlay) return;
-  void flushPersistence().then(() => player.play()).catch(showError);
+  void startCurrentPlayback().catch(showError);
 });
 ui.pause.addEventListener("click", () => { void player.pause().catch(showError); });
 ui.stop.addEventListener("click", async () => {
@@ -1470,10 +1661,12 @@ ui.stop.addEventListener("click", async () => {
     const wasPreview = player.snapshot().activeKind === "preview";
     await player.stop();
     const snapshot = player.snapshot();
-    if (currentSession && !wasPreview) {
-      currentSession = { ...currentSession, selectedIndex: snapshot.selectedIndex, position: 0, status: "stopped" };
-      await repository.saveSession(currentSession);
-      player.setSession(currentSession);
+    if (player.session && !wasPreview) {
+      const stoppedSession = await repository.saveSession({
+        ...player.session, selectedIndex: snapshot.selectedIndex, position: 0, status: "stopped"
+      });
+      player.session = stoppedSession;
+      if (currentSession?.id === stoppedSession.id) currentSession = stoppedSession;
     }
   } catch (error) { showError(error); }
 });
@@ -1486,15 +1679,13 @@ ui.deleteAudioCache.addEventListener("click", async () => {
   try {
     await player.clearAudioCache();
     await repository.clearAudioCache();
-    if (currentSession) {
-      const chunkStates = currentSession.chunks.map((_, index) => currentSession.chunkStates?.[index] === "error" ? "error" : "pending");
-      currentSession = {
-        ...currentSession,
-        audioKeys: [],
-        chunkStates,
-        lastError: chunkStates.includes("error") ? currentSession.lastError || "" : ""
-      };
-    }
+    const clearAudioReferences = (session) => {
+      if (!session) return null;
+      const chunkStates = (session.chunks || []).map((_, index) => session.chunkStates?.[index] === "error" ? "error" : "pending");
+      return { ...session, audioKeys: [], chunkStates, lastError: chunkStates.includes("error") ? session.lastError || "" : "" };
+    };
+    if (player.session) player.session = clearAudioReferences(player.session);
+    if (currentSession) currentSession = clearAudioReferences(currentSession);
     await refreshDownloadLink(null);
     await refreshStorageUsage();
     ui.fileStatus.textContent = "Audios generados eliminados; documentos y sesiones conservados.";
@@ -1537,7 +1728,7 @@ document.addEventListener("keydown", (event) => {
   if (event.code === "Space") {
     event.preventDefault();
     if (player.snapshot().status === "playing") void player.pause().catch(showError);
-    else void flushPersistence().then(() => player.play()).catch(showError);
+    else void startCurrentPlayback().catch(showError);
   } else if (event.key === "ArrowLeft") {
     event.preventDefault();
     void player.previous().catch(showError);
@@ -1548,7 +1739,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("pagehide", () => {
-  void flushPersistence({ replaceQueue: pendingQueueReplacement });
+  void flushPersistence();
   if (downloadObjectUrl) URL.revokeObjectURL(downloadObjectUrl);
   player.dispose();
 });

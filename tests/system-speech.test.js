@@ -65,6 +65,7 @@ test("system speech validates the selected voice, applies rate, forwards playbac
   const utterance = api.utterances[0];
   assert.equal(utterance.text, "Hola, mundo.");
   assert.equal(utterance.voice, spanishVoices.find((item) => item.voiceURI === voice.providerVoiceId));
+  assert.equal(utterance.lang, voice.locale, "the utterance must use its selected voice language, not the offscreen document default");
   assert.equal(utterance.rate, 1.5);
   utterance.onstart();
   utterance.onpause();
@@ -85,7 +86,20 @@ test("system speech reports non-cancellation playback failures", async () => {
   const errors = [];
   provider.play(result, { onError: (error) => errors.push(error.message) });
   api.current.onerror({ error: "audio-busy" });
-  assert.deepEqual(errors, ["SpeechSynthesis: audio-busy"]);
+  assert.deepEqual(errors, [`SpeechSynthesis: audio-busy · ${voice.name} · ${voice.locale} · voz del sistema`]);
+});
+
+test("system speech diagnostics identify the selected voice without exposing the spoken text", async () => {
+  const api = new FakeSpeechSynthesis(spanishVoices.map((voice) => ({ ...voice, localService: false })));
+  const provider = new SystemSpeechProvider({ speechSynthesis: api, Utterance: FakeUtterance });
+  const [voice] = await provider.listVoices();
+  const result = await provider.synthesize("private text", voice.id);
+  const errors = [];
+  provider.play(result, { onError: (error) => errors.push(error.message) });
+  api.current.onerror({ error: "synthesis-failed" });
+
+  assert.deepEqual(errors, [`SpeechSynthesis: synthesis-failed · ${voice.name} · ${voice.locale} · voz en línea`]);
+  assert.doesNotMatch(errors[0], /private text/);
 });
 
 test("an external system interruption reaches the player as an error", async () => {
@@ -97,4 +111,21 @@ test("an external system interruption reaches the player as an error", async () 
   provider.play(result, { onError: (error) => errors.push(error.message) });
   api.current.onerror({ error: "interrupted" });
   assert.deepEqual(errors, ["La reproducción de la voz del sistema fue interrumpida."]);
+});
+
+test("system speech reports a voice that never starts instead of leaving playback pending", async () => {
+  const api = new FakeSpeechSynthesis(spanishVoices);
+  let cancelled = 0;
+  api.cancel = () => { cancelled++; api.current = null; };
+  const provider = new SystemSpeechProvider({ speechSynthesis: api, Utterance: FakeUtterance, startTimeoutMs: 5 });
+  const [voice] = await provider.listVoices();
+  const result = await provider.synthesize("Hola.", voice.id);
+  const errors = [];
+  provider.play(result, { onError: (error) => errors.push(error.message) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(cancelled, 1);
+  assert.equal(provider.currentUtterance, null);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /no confirmó el inicio/);
 });

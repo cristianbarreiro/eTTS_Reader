@@ -197,6 +197,21 @@ export class PersistentReaderEngine {
       case "status":
         await this.saveTail;
         return this._response();
+      case "restore": {
+        const session = message.session;
+        if (!session?.id || session.queuePrepared === false || !Array.isArray(session.chunks) || !session.chunks.length) {
+          throw new Error("La sesión guardada no contiene una cola preparada.");
+        }
+        if (this.activeSession?.id !== session.id) {
+          if (this.activeSession) {
+            this.player.stop();
+            await this.saveTail;
+          }
+          this._applySession(session, { restore: true });
+          await this.repository.saveSession(this.activeSession);
+        }
+        return this._response();
+      }
       case "initialize": {
         const voice = message.voice || this.activeSession?.voice || "af_heart";
         if (isSystemVoiceId(voice)) {
@@ -209,7 +224,9 @@ export class PersistentReaderEngine {
       }
       case "start": {
         const session = message.session;
-        if (!session?.id || !Array.isArray(session.chunks) || !session.chunks.length) throw new Error("La sesión no contiene fragmentos para leer.");
+        if (!session?.id || session.queuePrepared === false || !Array.isArray(session.chunks) || !session.chunks.length) {
+          throw new Error("La sesión no contiene una cola preparada para leer.");
+        }
         if (this.activeSession?.id === session.id && this.player.snapshot().status === "playing") return this._response();
         if (this.activeSession?.id === session.id) {
           const started = await this.player.play();
@@ -227,7 +244,9 @@ export class PersistentReaderEngine {
       }
       case "replace": {
         const session = message.session;
-        if (!session?.id) throw new Error("La sesión no es válida.");
+        if (!session?.id || !session.queuePrepared || !Array.isArray(session.chunks) || !session.chunks.length) {
+          throw new Error("La sesión no contiene una cola preparada válida.");
+        }
         if (this.activeSession?.id && this.activeSession.id !== session.id) {
           this.player.stop();
           await this.saveTail;
@@ -237,7 +256,11 @@ export class PersistentReaderEngine {
         return this._response();
       }
       case "pause": this.player.pause(); break;
-      case "stop": this.player.stop(); break;
+      case "stop":
+        this.sessionGeneration++;
+        this.inFlightAudio.clear();
+        this.player.stop();
+        break;
       case "forget-session": {
         const sessionId = message.sessionId;
         if (this.activeSession?.id !== sessionId) return this._response();

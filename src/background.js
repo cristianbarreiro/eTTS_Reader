@@ -713,12 +713,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await chrome.offscreen.closeDocument().catch(() => {});
       return result;
     }
-    if (message.command === "replace") return sendOffscreen("replace", message.payload || {}, { create: false });
+    if (message.command === "replace") return sendOffscreen("replace", message.payload || {}, { create: true });
     if (message.command === "delete-model") {
       const result = await sendOffscreen("close-idle", {}, { create: false });
       return result;
     }
-    const needsContext = ["start", "preview", "initialize"].includes(message.command);
+    const needsContext = ["start", "preview", "initialize", "restore"].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };
   void run().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "Falló la coordinación del lector." }));

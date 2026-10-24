@@ -71,6 +71,14 @@ test("reader controls stay disabled while idle, loading, or failed; retry is ena
   assert.equal(deriveReaderControls("ready", 0).canPlay, false);
 });
 
+test("a loaded queue can start lazy Kokoro initialization, but loading and failed engines remain blocked", () => {
+  assert.equal(deriveReaderControls("idle", 1, false, { allowLazyInitialization: true }).canPlay, true);
+  assert.equal(deriveReaderControls("cached", 1, false, { allowLazyInitialization: true }).canPlay, true);
+  assert.equal(deriveReaderControls("loading", 1, false, { allowLazyInitialization: true }).canPlay, false);
+  assert.equal(deriveReaderControls("error", 1, false, { allowLazyInitialization: true }).canPlay, false);
+  assert.equal(deriveReaderControls("error", 1, false, { allowLazyInitialization: true, audioAvailable: true }).canPlay, true);
+});
+
 test("cached model files do not count as an initialized engine", () => {
   const cached = deriveReaderControls("cached", 1);
   assert.equal(cached.canPlay, false);

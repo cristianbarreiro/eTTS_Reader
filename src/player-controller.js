@@ -206,7 +206,18 @@ export class PlaybackController {
     try {
       if (this.activeSpeech) {
         if (!this.speech?.play) throw new Error("La reproducción de voces del sistema no está disponible en este contexto.");
-        if (this.state.status === "paused" && this.speech.resume?.()) return true;
+        if (this.state.status === "starting") return true;
+        if (this.state.status === "paused") {
+          this.state.status = "starting";
+          this.state.message = "Reanudando la voz del sistema…";
+          this._publish();
+          if (this.speech.resume?.()) return true;
+          this.state.status = "audio-ready";
+        }
+        this.state.status = "starting";
+        this.state.playingIndex = this.activeIndex;
+        this.state.message = "Esperando el inicio de la voz del sistema…";
+        this._publish();
         this.speech.play(this.activeSpeech, {
           rate: this.state.speed,
           onStart: () => this._handlePlaybackStart(token),
@@ -221,9 +232,6 @@ export class PlaybackController {
           onEnd: () => { if (token === this.operationId) void this._handleEnded(); },
           onError: (error) => this._fail(error, token)
         });
-        // SpeechSynthesis fires `start` asynchronously. Mark the player busy now so
-        // a fast second click cannot enqueue the same utterance twice.
-        this._handlePlaybackStart(token);
         return true;
       }
       if (this.pendingResumePosition > 0) {
@@ -321,8 +329,8 @@ export class PlaybackController {
       this.audio.playbackRate = normalized;
       if ("preservesPitch" in this.audio) this.audio.preservesPitch = true;
     }
-    if (this.activeSpeech && ["playing", "paused"].includes(this.state.status)) {
-      const wasPlaying = this.state.status === "playing";
+    if (this.activeSpeech && ["playing", "paused", "starting"].includes(this.state.status)) {
+      const wasPlaying = ["playing", "starting"].includes(this.state.status);
       this.speech?.cancel?.();
       this.state.speechCharacterIndex = 0;
       this.state.status = "audio-ready";
@@ -476,7 +484,7 @@ export class PlaybackController {
       }
       return false;
     }
-    if (this.state.status === "playing") return true;
+    if (this.state.status === "playing" || this.state.status === "starting") return true;
     if (this.state.status === "generating" && this.currentTask && this.currentTaskKey === `chunk:${this.state.selectedIndex}`) {
       return this.currentTask;
     }

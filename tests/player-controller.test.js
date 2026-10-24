@@ -365,6 +365,33 @@ test("voice sample can pause, resume, replay, and stop without document text", a
   assert.deepEqual(synthCalls.map(({ text }) => text), ["Hello."]);
 });
 
+test("system speech stays in starting state until the real start event and surfaces provider errors", async () => {
+  const voiceId = "system:Microsoft%20Sabina%00es-MX";
+  let callbacks;
+  let playCalls = 0;
+  const speech = {
+    play(_result, value) { playCalls++; callbacks = value; },
+    cancel() {}
+  };
+  const { player } = makePlayer({
+    speech,
+    getVoice: () => voiceId,
+    synthesize: async (text) => ({ kind: "system-speech", provider: "speechSynthesis", voiceId, text })
+  });
+  player.setChunks(["Hola."]);
+
+  assert.equal(await player.play(), true);
+  assert.equal(player.snapshot().status, "starting");
+  assert.equal(player.snapshot().playingIndex, 0);
+  assert.equal(await player.play(), true);
+  assert.equal(playCalls, 1, "a second click must not enqueue the utterance twice");
+  callbacks.onStart();
+  assert.equal(player.snapshot().status, "playing");
+  callbacks.onError(new Error("voice did not start"));
+  assert.equal(player.snapshot().status, "error");
+  assert.match(player.snapshot().message, /voice did not start/);
+});
+
 test("system speech uses the same queue controls without creating a fake WAV download", async () => {
   const voiceId = "system:Microsoft%20Sabina%00es-MX";
   const utterances = [];

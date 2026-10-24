@@ -1,5 +1,9 @@
+import { formatTime } from "./audio-utils.js";
+
 export function playerHeaderState(status) {
   return ({
+    "text-ready": "Cola lista",
+    starting: "Iniciando voz",
     generating: "Preparando audio",
     "audio-ready": "Audio preparado",
     playing: "Reproduciendo",
@@ -8,6 +12,19 @@ export function playerHeaderState(status) {
     completed: "Completada",
     error: "Error"
   })[status] || "";
+}
+
+export function readingDurationSummary(snapshot, activeProvider = snapshot.activeProvider) {
+  if (activeProvider === "speechSynthesis") return "La duración y la búsqueda temporal no están disponibles para voces del sistema.";
+  if (snapshot.activeKind === "preview") return `Duración de la muestra ${formatTime(snapshot.duration)}`;
+  if (Number.isFinite(snapshot.totalDuration)) return `Duración total ${formatTime(snapshot.totalDuration)} · ${snapshot.knownDurationCount} fragmentos medidos`;
+  const durations = Array.isArray(snapshot.durations) ? snapshot.durations : [];
+  const known = durations.filter(Number.isFinite);
+  const knownSeconds = known.reduce((sum, duration) => sum + duration, 0);
+  const knownCaption = known.length ? formatTime(knownSeconds) : "—";
+  return snapshot.chunks?.length
+    ? `Duración conocida ${knownCaption} · total pendiente (${known.length}/${snapshot.chunks.length} fragmentos medidos)`
+    : "La duración aparecerá cuando se genere audio.";
 }
 
 export function readingProgressCaption(snapshot) {

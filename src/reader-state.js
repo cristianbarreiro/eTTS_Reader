@@ -1,9 +1,12 @@
-export function deriveReaderControls(modelState, chunkCount, audioPlaying = false, { provider = "kokoro", systemVoiceAvailable = false, audioAvailable = false } = {}) {
+export function deriveReaderControls(modelState, chunkCount, audioPlaying = false, {
+  provider = "kokoro", systemVoiceAvailable = false, audioAvailable = false, allowLazyInitialization = false
+} = {}) {
   const modelReady = modelState === "ready";
   const systemProvider = provider === "speechSynthesis";
+  const lazyStartAvailable = allowLazyInitialization && ["idle", "cached"].includes(modelState);
   return {
     canInitialize: !systemProvider && modelState !== "loading" && !modelReady,
-    canPlay: (systemProvider ? systemVoiceAvailable : modelReady || audioAvailable) && chunkCount > 0,
+    canPlay: (systemProvider ? systemVoiceAvailable : modelReady || audioAvailable || lazyStartAvailable) && chunkCount > 0,
     canTestVoice: systemProvider ? systemVoiceAvailable : modelReady,
     canPause: audioPlaying
   };

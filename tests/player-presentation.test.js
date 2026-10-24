@@ -2,15 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { kokoroEngineLabel, playerHeaderState, readingProgressCaption } from "../src/player-presentation.js";
+import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "../src/player-presentation.js";
 
 const sidepanel = await readFile(fileURLToPath(new URL("../sidepanel.html", import.meta.url)), "utf8");
 const styles = await readFile(fileURLToPath(new URL("../src/style.css", import.meta.url)), "utf8");
 
 test("player heading exposes only meaningful playback states", () => {
   assert.equal(playerHeaderState("empty"), "");
-  assert.equal(playerHeaderState("text-ready"), "");
+  assert.equal(playerHeaderState("text-ready"), "Cola lista");
   assert.equal(playerHeaderState("stopped"), "");
+  assert.equal(playerHeaderState("starting"), "Iniciando voz");
   assert.equal(playerHeaderState("generating"), "Preparando audio");
   assert.equal(playerHeaderState("playing"), "Reproduciendo");
   assert.equal(playerHeaderState("paused"), "Pausado");
@@ -25,6 +26,13 @@ test("document progress captions distinguish temporal, chunk-based, and system s
   assert.equal(readingProgressCaption({ ...base, activeProvider: "speechSynthesis" }), "Aprox. 50% por texto");
   assert.equal(readingProgressCaption({ ...base, activeKind: "preview" }), "Muestra independiente");
   assert.equal(readingProgressCaption({ ...base, chunks: [] }), "Sin progreso");
+});
+
+test("duration summary never presents zero as a measured duration before audio metadata exists", () => {
+  const queued = { chunks: ["Hello."], durations: [null], totalDuration: null, knownDurationCount: 0, activeKind: "chunk" };
+  assert.equal(readingDurationSummary(queued, "kokoro"), "Duración conocida — · total pendiente (0/1 fragmentos medidos)");
+  assert.equal(readingDurationSummary({ ...queued, durations: [2.4], knownDurationCount: 1 }, "kokoro"), "Duración conocida 0:02 · total pendiente (1/1 fragmentos medidos)");
+  assert.equal(readingDurationSummary(queued, "speechSynthesis"), "La duración y la búsqueda temporal no están disponibles para voces del sistema.");
 });
 
 test("voice provider pill retains Kokoro identity while showing model availability", () => {

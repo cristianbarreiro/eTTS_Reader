@@ -6,13 +6,16 @@ export class SystemSpeechProvider {
   constructor({
     speechSynthesis = globalThis.speechSynthesis,
     Utterance = globalThis.SpeechSynthesisUtterance,
-    voicesWaitMs = 1000
+    voicesWaitMs = 1000,
+    startTimeoutMs = 12000
   } = {}) {
     this.speechSynthesis = speechSynthesis;
     this.Utterance = Utterance;
     this.voicesWaitMs = voicesWaitMs;
+    this.startTimeoutMs = startTimeoutMs;
     this.currentUtterance = null;
     this.generation = 0;
+    this.startTimer = null;
   }
 
   isAvailable() {
@@ -61,27 +64,61 @@ export class SystemSpeechProvider {
     if (!voice) throw new Error("La voz española del sistema ya no está disponible. Actualiza la lista de voces.");
     const utterance = new this.Utterance(result.text);
     const generation = ++this.generation;
+    clearTimeout(this.startTimer);
     this.currentUtterance = utterance;
+    let started = false;
     utterance.voice = voice;
+    // SpeechSynthesisUtterance otherwise inherits the offscreen document's
+    // lang value. Always request the language supported by the selected voice.
+    utterance.lang = String(voice.lang || "es");
     utterance.rate = Math.min(2, Math.max(0.5, Number(rate) || 1));
-    utterance.onstart = () => { if (this.generation === generation) onStart(); };
+    this.startTimer = setTimeout(() => {
+      if (this.generation !== generation || started) return;
+      this.currentUtterance = null;
+      this.startTimer = null;
+      this.generation++;
+      this.speechSynthesis.cancel?.();
+      onError(new Error("SpeechSynthesis no confirmó el inicio de la voz. Comprueba que la voz seleccionada siga disponible y vuelve a intentarlo."));
+    }, this.startTimeoutMs);
+    utterance.onstart = () => {
+      if (this.generation !== generation) return;
+      started = true;
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
+      onStart();
+    };
     utterance.onpause = () => { if (this.generation === generation) onPause(); };
     utterance.onresume = () => { if (this.generation === generation) onResume(); };
     utterance.onboundary = (event) => { if (this.generation === generation) onBoundary({ charIndex: Number(event?.charIndex) || 0, charLength: result.text.length }); };
     utterance.onend = () => {
       if (this.generation !== generation) return;
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
       this.currentUtterance = null;
       onEnd();
     };
     utterance.onerror = (event) => {
       if (this.generation !== generation) return;
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
       this.currentUtterance = null;
+      const voiceDetails = [voice.name, voice.lang, voice.localService === false ? "voz en línea" : voice.localService === true ? "voz local" : "voz del sistema"]
+        .filter(Boolean)
+        .join(" · ");
       const detail = event?.error === "canceled" || event?.error === "interrupted"
         ? "La reproducción de la voz del sistema fue interrumpida."
-        : event?.error ? `SpeechSynthesis: ${event.error}` : "La voz del sistema no pudo reproducirse.";
+        : event?.error ? `SpeechSynthesis: ${event.error}${voiceDetails ? ` · ${voiceDetails}` : ""}` : "La voz del sistema no pudo reproducirse.";
       onError(new Error(detail));
     };
-    this.speechSynthesis.speak(utterance);
+    try {
+      this.speechSynthesis.speak(utterance);
+    } catch (error) {
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
+      this.currentUtterance = null;
+      this.generation++;
+      throw error;
+    }
   }
 
   pause() {
@@ -97,6 +134,8 @@ export class SystemSpeechProvider {
   }
 
   cancel() {
+    clearTimeout(this.startTimer);
+    this.startTimer = null;
     this.generation++;
     const hadSpeech = Boolean(this.currentUtterance);
     this.currentUtterance = null;

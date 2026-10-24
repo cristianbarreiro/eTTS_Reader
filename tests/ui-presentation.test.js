@@ -45,4 +45,7 @@ test("user-facing errors hide raw runtime diagnostics while retaining useful gui
   assert.doesNotMatch(wasm, /ort-wasm/);
   const storage = userFacingErrorMessage(new Error("QuotaExceededError: transaction aborted"));
   assert.match(storage, /espacio disponible/);
+  const speech = userFacingErrorMessage(new Error("SpeechSynthesis: synthesis-failed · Microsoft Abril Online · es-ES · voz en línea"), "playback");
+  assert.match(speech, /Comprueba la conexión/);
+  assert.match(speech, /Kokoro/);
 });
