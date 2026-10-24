@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Lector local para Edge",
+  "name": "eTTS Reader",
   "version": "0.5.0",
   "description": "Lee texto y documentos con Kokoro inglés y Piper español, de forma local.",
   "action": {
-    "default_title": "Abrir lector local",
+    "default_title": "Abrir eTTS Reader",
     "default_icon": {
       "16": "public/icons/etts-16.png",
       "32": "public/icons/etts-32.png",

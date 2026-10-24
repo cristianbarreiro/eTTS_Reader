@@ -1,4 +1,4 @@
-# Lector local para Edge
+# eTTS Reader
 
 Extensión Manifest V3 para leer texto y documentos con Kokoro TTS en inglés y Piper TTS en español, ambos locales y ejecutados en WASM/CPU. La experiencia principal vive en el Side Panel de Edge, no en un popup que se destruye al perder el foco.
 

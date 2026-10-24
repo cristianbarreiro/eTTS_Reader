@@ -70,7 +70,7 @@ test("development and production manifests declare real extension icons at every
 test("Side Panel uses a single accessible vector mark beside real HTML wordmark text", () => {
   const html = readFileSync(path.join(root, "sidepanel.html"), "utf8");
   assert.match(html, /<img class="brand-mark" src="\.\/assets\/branding\/etts-symbol\.svg" alt="" aria-hidden="true">/);
-  assert.match(html, /<h1>eTTS<\/h1>\s*<p>Lector local<\/p>/);
+  assert.match(html, /<h1>eTTS Reader<\/h1>\s*<p>Lector local<\/p>/);
   assert.equal((html.match(/class="brand-mark"/g) || []).length, 1);
-  assert.equal((html.match(/<h1>eTTS<\/h1>/g) || []).length, 1);
+  assert.equal((html.match(/<h1>eTTS Reader<\/h1>/g) || []).length, 1);
 });
