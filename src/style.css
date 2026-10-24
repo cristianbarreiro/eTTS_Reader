@@ -211,29 +211,32 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 .storage-row .hint { flex: 1 1 100%; margin: 0; font-size: 10px; }
 .storage-row .text-button { min-height: 30px; }
 
-.library-card { overflow: hidden; padding: 0; }
-.library-card > summary { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 13px; cursor: pointer; list-style: none; }
-.library-card > summary::after { content: ""; display: block; width: 18px; height: 18px; flex: 0 0 18px; align-self: center; margin-left: auto; background: var(--accent); clip-path: polygon(0 22%, 12% 10%, 50% 50%, 88% 10%, 100% 22%, 50% 78%); transform: rotate(0deg); transform-origin: 50% 50%; }
+.library-card { overflow: hidden; padding: 0; border-color: #29425f; background: linear-gradient(145deg, #142338, #111d2c 72%); }
+.library-card > summary { display: flex; min-height: 56px; align-items: center; justify-content: flex-start; gap: 10px; padding: 12px 14px; cursor: pointer; list-style: none; }
+.library-card > summary::after { content: ""; display: block; width: 16px; height: 16px; flex: 0 0 16px; align-self: center; margin-left: auto; background: var(--accent); clip-path: polygon(0 22%, 12% 10%, 50% 50%, 88% 10%, 100% 22%, 50% 78%); transform: rotate(0deg); transform-origin: 50% 50%; }
 .library-card[open] > summary::after { transform: rotate(180deg); }
-.library-title { font-size: 13px; font-weight: 700; }
-.library-card > summary .hint { margin: 0; font-size: 9px; font-weight: 400; text-align: right; }
-.library-group { padding: 0 12px 10px; border-top: 1px solid var(--border-soft); }
-.library-group > .hint { margin: 7px 0; }
-.library-list { display: grid; gap: 6px; }
-.library-empty { padding: 12px 9px; margin: 0; border: 1px dashed var(--border); border-radius: 10px; text-align: center; }
-.library-entry { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
-.library-entry[data-active="true"] { border-color: #42699b; background: #172b43; }
-.library-entry-content { display: grid; flex: 1 1 150px; gap: 3px; min-width: 0; }
-.library-entry-title { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.library-entry-meta { color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
-.library-entry-actions { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 4px; }
-.library-session-details { flex: 1 0 100%; width: 100%; margin-top: 2px; color: var(--muted); font-size: 10px; }
-.library-session-details > summary { width: fit-content; color: var(--accent); cursor: pointer; }
-.library-session-list { display: grid; gap: 5px; margin-top: 6px; }
-.library-session-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 6px; padding: 6px; border-radius: 8px; background: var(--surface-raised); }
-.library-session-row > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
-.library-open { min-height: 34px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: var(--text); font-size: 10px; cursor: pointer; }
-.library-resume { border-color: #32618f; background: #173653; color: #d8edff; }
+.library-title { color: var(--text); font-size: 14px; font-weight: 750; letter-spacing: -.015em; }
+.library-card > summary .hint { min-width: 0; padding-left: 10px; margin: 0; border-left: 1px solid #3b5877; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; font-weight: 450; line-height: 1.3; text-align: left; }
+.library-group { padding: 0 12px 12px; border-top: 1px solid var(--border-soft); }
+.library-group > .hint { margin: 10px 2px; line-height: 1.5; }
+.library-list { display: grid; gap: 8px; }
+.library-empty { padding: 17px 12px; margin: 0; border: 1px dashed #385575; border-radius: 12px; background: rgb(10 22 36 / 38%); color: var(--muted); line-height: 1.5; text-align: center; }
+.library-entry { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; padding: 11px; border: 1px solid #31577f; border-radius: 12px; background: linear-gradient(135deg, #172b42, #132338); box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%); }
+.library-entry[data-active="true"] { border-color: #3977b5; background: linear-gradient(135deg, #193451, #14283e); }
+.library-entry-content { display: grid; flex: 1 1 150px; gap: 5px; min-width: 0; }
+.library-entry-title { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.library-entry-meta { color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.library-entry-actions { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 6px; }
+.library-session-details { flex: 1 0 100%; width: 100%; padding-top: 8px; margin-top: 1px; border-top: 1px solid rgb(92 128 167 / 25%); color: var(--muted); font-size: 10px; }
+.library-session-details > summary { display: flex; width: fit-content; align-items: center; gap: 8px; padding: 3px 2px; color: var(--accent); font-size: 11px; font-weight: 650; cursor: pointer; list-style: none; }
+.library-session-details > summary::-webkit-details-marker { display: none; }
+.library-session-details > summary::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); }
+.library-session-details[open] > summary::before { transform: rotate(225deg) translateY(-2px); }
+.library-session-list { display: grid; gap: 6px; margin-top: 7px; }
+.library-session-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--border-soft); border-radius: 9px; background: rgb(12 24 38 / 56%); }
+.library-session-row > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.library-open { min-height: 36px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); color: var(--text); font-size: 10px; font-weight: 650; cursor: pointer; }
+.library-resume { border-color: #326da7; background: #193a5a; color: #d8edff; }
 .library-resume:hover:not(:disabled) { border-color: #58a9e8; background: #20517b; color: #fff; }
 .library-delete { display: grid; width: 38px; height: 38px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--error); cursor: pointer; }
 .library-delete svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; }
@@ -241,6 +244,7 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
 .library-delete:hover:not(:disabled) { border-color: #ef4444; background: #7f1d1d; color: #fecaca; }
 .library-resume:focus-visible, .library-delete:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 #library-status:empty { display: none; }
+#library-status:not(:empty) { padding: 0 13px 10px; margin: 0; }
 
 .confirm-dialog { width: min(380px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: calc(100vh - 32px); overflow: auto; padding: 0; margin: auto; border: 1px solid #3b4d65; border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 14px 36px #0008; }
 .confirm-dialog::backdrop { background: rgb(3 8 16 / 68%); }
@@ -284,7 +288,9 @@ progress { display: block; width: 100%; height: 7px; margin-top: 10px; accent-co
   .test-voice { grid-column: 1 / -1; width: 100%; }
   .player-heading-meta { gap: 6px; }
   .player-state { max-width: 92px; }
-  .library-card > summary { align-items: flex-start; flex-wrap: wrap; }
+  .library-card > summary { min-height: 52px; gap: 7px; padding: 10px 12px; }
+  .library-title { font-size: 13px; }
+  .library-card > summary .hint { padding-left: 8px; font-size: 9px; }
   .library-entry { align-items: flex-start; }
 }
 
