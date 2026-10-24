@@ -72,6 +72,15 @@ Extensión Manifest V3 para leer texto y documentos con Kokoro TTS en inglés y 
 
 Para actualizar, vuelve a compilar y pulsa **Recargar** en `edge://extensions`.
 
+## Flujo de desarrollo asistido por IA
+
+- Las reglas compartidas para agentes están en [AGENTS.md](AGENTS.md).
+- Los límites de módulos, workers, proveedores y almacenamiento están en [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- Los comandos, pruebas automatizadas y procedimientos manuales en Edge están en [docs/TESTING.md](docs/TESTING.md).
+- Los procedimientos reutilizables están en .agents/skills/; .github/skills/ contiene entradas compatibles con GitHub Copilot que apuntan a esas fuentes canónicas.
+- Para cambios de proveedores, almacenamiento/sesiones, UI o validación de release, consulta la skill que corresponda. No informes de pruebas audibles o validación offline que no se hayan realizado.
+- La plantilla de pull request pide describir validación, impactos sobre datos, modelos, permisos y licencias.
+
 ## Validación
 
 `npm test` cubre segmentación, reproducción simulada, reanudación, persistencia IndexedDB, migración de sesiones, cachés separadas por voz/modelo, catálogo Piper/Kokoro, preparación y errores, carga OPFS simulada y extracción/importación de documentos. Estas pruebas no sustituyen una prueba real en Edge ni validan el audio audible con los modelos completos.
