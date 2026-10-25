@@ -54,7 +54,7 @@ export class ReaderClient {
       } else if (message.type === "reader:model" || message.type === "reader:model-progress") {
         this.onModel(message);
       } else if (message.type === "reader:error") {
-        this.onModel({ type: "reader:model", state: "error", message: message.message });
+        this.onModel({ type: "reader:model", state: "error", message: message.message, diagnostics: message.diagnostics, code: message.code, phase: message.phase });
       }
     };
     this.runtime.onMessage.addListener(this.listener);
@@ -81,6 +81,7 @@ export class ReaderClient {
       const error = new Error(response.error || "Falló el motor local de lectura.");
       if (response.code) error.code = response.code;
       if (response.phase) error.phase = response.phase;
+      if (response.diagnostics) error.diagnostics = response.diagnostics;
       throw error;
     }
     if (response?.snapshot && (!response.sessionId || response.sessionId === this.session?.id)) {

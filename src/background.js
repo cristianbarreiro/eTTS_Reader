@@ -1,5 +1,6 @@
 import { classifyTab, extractReadablePage, safeSourceUrl } from "./tab-import.js";
 import { localTabFileName, safeTabTitle } from "./tab-card-presentation.js";
+import { serializeErrorDiagnostics } from "./error-diagnostics.js";
 
 const PANEL_PATH = chrome.runtime.getManifest().side_panel?.default_path || "sidepanel.html";
 const OFFSCREEN_PATH = `${PANEL_PATH.slice(0, PANEL_PATH.lastIndexOf("/") + 1)}offscreen.html`;
@@ -734,6 +735,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };
-  void run().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "Falló la coordinación del lector.", code: error?.code, phase: error?.phase }));
+  void run().then(sendResponse).catch((error) => sendResponse({
+    ok: false,
+    error: error?.message || "Falló la coordinación del lector.",
+    code: error?.code,
+    phase: error?.phase,
+    diagnostics: serializeErrorDiagnostics(error)
+  }));
   return true;
 });

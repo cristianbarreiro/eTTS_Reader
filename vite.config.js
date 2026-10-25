@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 const kokoroRuntimeFiles = ["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"];
@@ -60,8 +60,10 @@ export default defineConfig({
       mkdirSync(kokoroRuntimeTo, { recursive: true });
       for (const file of kokoroRuntimeFiles) {
         const source = resolve(kokoroRuntimeFrom, file);
-        if (!readFileSync(source).length) throw new Error(`Kokoro ONNX Runtime asset is empty: ${source}`);
-        copyFileSync(source, resolve(kokoroRuntimeTo, file));
+        const sourceBytes = readFileSync(source);
+        if (!sourceBytes.length) throw new Error(`Kokoro ONNX Runtime asset is empty: ${source}`);
+        const destination = resolve(kokoroRuntimeTo, file);
+        if (!existsSync(destination) || !readFileSync(destination).equals(sourceBytes)) copyFileSync(source, destination);
       }
 
       const piperOnnx = readPackage("node_modules/onnxruntime-web/package.json");
@@ -76,14 +78,20 @@ export default defineConfig({
       }
       for (const file of piperRuntimeFiles) {
         const source = resolve(piperRuntimeFrom, file);
-        if (!readFileSync(source).length) throw new Error(`Piper ONNX Runtime asset is empty: ${source}`);
-        copyFileSync(source, resolve(piperRuntimeTo, file));
+        const sourceBytes = readFileSync(source);
+        if (!sourceBytes.length) throw new Error(`Piper ONNX Runtime asset is empty: ${source}`);
+        const destination = resolve(piperRuntimeTo, file);
+        if (!existsSync(destination) || !readFileSync(destination).equals(sourceBytes)) copyFileSync(source, destination);
       }
 
       const voicesFrom = resolve("node_modules/kokoro-js/voices");
       const voicesTo = resolve("dist/voices");
       mkdirSync(voicesTo, { recursive: true });
-      for (const file of voiceFiles) copyFileSync(resolve(voicesFrom, file), resolve(voicesTo, file));
+      for (const file of voiceFiles) {
+        const source = resolve(voicesFrom, file);
+        const destination = resolve(voicesTo, file);
+        if (!existsSync(destination) || !readFileSync(destination).equals(readFileSync(source))) copyFileSync(source, destination);
+      }
 
       const phonemizerFrom = resolve("node_modules/@diffusionstudio/piper-wasm/build");
       const phonemizerTo = resolve("dist/piper");
@@ -91,7 +99,8 @@ export default defineConfig({
       for (const file of ["piper_phonemize.wasm", "piper_phonemize.data"]) {
         const source = resolve(phonemizerFrom, file);
         if (!readFileSync(source).length) throw new Error(`Piper phonemizer asset is empty: ${source}`);
-        copyFileSync(source, resolve(phonemizerTo, file));
+        const destination = resolve(phonemizerTo, file);
+        if (!existsSync(destination) || !readFileSync(destination).equals(readFileSync(source))) copyFileSync(source, destination);
       }
     }
   }]

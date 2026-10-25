@@ -101,12 +101,26 @@ export class PiperWorkerClient {
         return;
       }
       if (data.type === "error") {
-        pending.reject(piperError(data.code || "PIPER_WORKER_OPERATION_FAILED", data.message || "Falló la inferencia Piper local.", { phase: data.phase }));
+        pending.reject(piperError(data.code || "PIPER_WORKER_OPERATION_FAILED", data.message || "Falló la inferencia Piper local.", {
+          phase: data.phase,
+          diagnostics: data.diagnostics || null
+        }));
       } else pending.resolve(data.value);
     };
     worker.onerror = (event) => {
       if (this.worker !== worker || this.workerGeneration !== generation) return;
-      this._invalidateWorker(worker, piperError("PIPER_WORKER_ERROR", event.message || "Falló el Web Worker Piper."));
+      const diagnostics = {
+        name: event.error?.name || "WorkerError",
+        message: event.message || "Falló el Web Worker Piper.",
+        stack: event.error?.stack || "",
+        filename: event.filename || "",
+        lineno: Number.isFinite(event.lineno) ? event.lineno : undefined,
+        colno: Number.isFinite(event.colno) ? event.colno : undefined
+      };
+      this._invalidateWorker(worker, piperError("PIPER_WORKER_ERROR", event.message || "Falló el Web Worker Piper.", {
+        phase: "worker",
+        diagnostics
+      }));
     };
     this.worker = worker;
     return worker;

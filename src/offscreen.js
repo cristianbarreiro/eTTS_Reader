@@ -3,6 +3,7 @@ import { KokoroWorkerClient } from "./tts-worker-client.js";
 import { PiperWorkerClient } from "./piper-worker-client.js";
 import { TTSProviderRouter } from "./tts-router.js";
 import { PersistentReaderEngine } from "./persistent-engine.js";
+import { serializeErrorDiagnostics } from "./error-diagnostics.js";
 
 const repository = new ReaderRepository();
 const inference = new TTSProviderRouter({ kokoro: new KokoroWorkerClient(), piper: new PiperWorkerClient() });
@@ -19,7 +20,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     ok: false,
     error: error?.message || "Falló el motor de lectura local.",
     code: error?.code,
-    phase: error?.phase
+    phase: error?.phase,
+    diagnostics: serializeErrorDiagnostics(error)
   }));
   return true;
 });

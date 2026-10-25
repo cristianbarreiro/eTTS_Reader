@@ -10,6 +10,7 @@ import { getVoiceProvider, getVoiceRecord, isLegacySystemVoiceId, PIPER_DEFAULT_
 import { isSelectedPiperVoiceMessage, shouldAcceptPiperOperationMessage } from "./piper-ui-state.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
+import { formatErrorDiagnostics } from "./error-diagnostics.js";
 import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "./player-presentation.js";
 import { createTabFaviconPresenter, safeTabTitle } from "./tab-card-presentation.js";
 import { playbackQueueMatchesEditor, preparePlaybackQueue } from "./playback-queue.js";
@@ -522,7 +523,7 @@ function handleModelMessage(message) {
     ui.downloadProgress.hidden = true;
   } else if (message.state === "error") {
     setKokoroModelState("error");
-    ui.modelStatus.textContent = showError(message.message || "Kokoro no pudo iniciarse.", "model");
+    ui.modelStatus.textContent = showError(message, "model");
     ui.downloadProgress.hidden = true;
   }
   ui.engineState.textContent = modelLabel();
@@ -2178,11 +2179,7 @@ function showError(error, action = "general") {
   ui.appAlertMessage.textContent = message;
   ui.appAlert.hidden = false;
   ui.errorDetails.hidden = !detail;
-  ui.errorTechnical.textContent = [
-    error?.code ? `Código: ${error.code}` : "",
-    error?.phase ? `Fase: ${error.phase}` : "",
-    detail
-  ].filter(Boolean).join(" · ");
+  ui.errorTechnical.textContent = formatErrorDiagnostics(error);
   return message;
 }
 

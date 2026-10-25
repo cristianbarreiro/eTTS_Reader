@@ -3,6 +3,7 @@ import { makeAudioCacheKey } from "./persistence.js";
 import { validateWavBlob } from "./audio-utils.js";
 import { getVoiceProvider, getVoiceRecord, KOKORO_RUNTIME_VERSION, PIPER_PROVIDER_VERSION, voiceSessionFields } from "./voice-catalog.js";
 import { isAudioStorageBusy, isProviderVoiceInUse, storageOperationBusyError } from "./storage-safety.js";
+import { serializeErrorDiagnostics } from "./error-diagnostics.js";
 
 export class PersistentReaderEngine {
   constructor({ audio, repository, inference, storage = globalThis.chrome?.storage?.local, publish = () => {}, now = () => Date.now(), progressWriteInterval = 1000 }) {
@@ -323,7 +324,8 @@ export class PersistentReaderEngine {
           this._publish("reader:model", {
             provider, voiceId: voice, state: "error", operationId,
             phase: error.phase || "initialize", code: error.code,
-            message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`
+            message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`,
+            diagnostics: serializeErrorDiagnostics(error)
           });
           throw error;
         }
@@ -347,7 +349,11 @@ export class PersistentReaderEngine {
           this._publish("reader:model", { provider: "piper", voiceId, operationId, state: "cached", phase: "download", message: `Modelo Piper instalado y verificado · ${voice.label}.` });
           return { ok: true, ...result };
         } catch (error) {
-          this._publish("reader:model", { provider: "piper", voiceId, operationId, state: "error", phase: error.phase || "download", code: error.code, message: error.message || "No se pudo instalar el modelo Piper." });
+          this._publish("reader:model", {
+            provider: "piper", voiceId, operationId, state: "error", phase: error.phase || "download", code: error.code,
+            message: error.message || "No se pudo instalar el modelo Piper.",
+            diagnostics: serializeErrorDiagnostics(error)
+          });
           throw error;
         }
       }

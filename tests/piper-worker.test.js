@@ -71,10 +71,54 @@ test("Piper worker reports initialization and unknown-command errors through its
   };
   const harness = makeWorkerHarness(provider);
   await harness.send({ id: 41, type: "initialize", voiceId: "piper:test", wasmPaths: {} });
-  assert.deepEqual(harness.messages.at(-1), { id: 41, type: "error", code: "PIPER_WORKER_OPERATION_FAILED", phase: null, message: "Falta el modelo instalado." });
+  const initializationError = harness.messages.at(-1);
+  assert.equal(initializationError.id, 41);
+  assert.equal(initializationError.type, "error");
+  assert.equal(initializationError.code, "PIPER_WORKER_OPERATION_FAILED");
+  assert.equal(initializationError.phase, null);
+  assert.equal(initializationError.message, "Falta el modelo instalado.");
+  assert.equal(initializationError.diagnostics.name, "Error");
+  assert.match(initializationError.diagnostics.stack, /Falta el modelo instalado/);
   await harness.send({ id: 42, type: "unknown" });
-  assert.deepEqual(harness.messages.at(-1), { id: 42, type: "error", code: "PIPER_WORKER_OPERATION_FAILED", phase: null, message: "Comando Piper desconocido: unknown" });
+  assert.equal(harness.messages.at(-1).message, "Comando Piper desconocido: unknown");
   harness.detach();
+});
+
+test("Piper worker sends phase, stack, and bounded cause with the remote failure", async () => {
+  const failure = new TypeError("Illegal invocation", { cause: new TypeError("fetch receiver is invalid") });
+  failure.code = "PIPER_ONNX_RUNTIME_FAILED";
+  failure.phase = "initializing-onnx";
+  const harness = makeWorkerHarness({
+    modelStore: { async listInstalled() { return []; } },
+    async initialize() { throw failure; }
+  });
+
+  await harness.send({ id: 43, type: "initialize", voiceId: "piper:test", wasmPaths: {} });
+  const response = harness.messages.at(-1);
+  assert.equal(response.code, failure.code);
+  assert.equal(response.phase, failure.phase);
+  assert.equal(response.diagnostics.name, "TypeError");
+  assert.match(response.diagnostics.stack, /Illegal invocation/);
+  assert.equal(response.diagnostics.cause.message, "fetch receiver is invalid");
+  harness.detach();
+});
+
+test("Piper client preserves worker diagnostics on its rejected request", async () => {
+  const remote = { name: "TypeError", message: "Illegal invocation", code: "PIPER_ONNX_RUNTIME_FAILED", phase: "initializing-onnx", stack: "TypeError: Illegal invocation\\n at fetch" };
+  const client = new PiperWorkerClient({ workerFactory: () => ({
+    postMessage(message) {
+      queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "error", ...remote, diagnostics: remote } }));
+    },
+    terminate() {}
+  }) });
+
+  await assert.rejects(client.initialize("piper:es_AR-daniela-high"), (error) => {
+    assert.equal(error.code, remote.code);
+    assert.equal(error.phase, remote.phase);
+    assert.deepEqual(error.diagnostics, remote);
+    return true;
+  });
+  client.dispose();
 });
 
 test("a timed-out initialization terminates its worker and the operation queue can create a fresh worker", async () => {

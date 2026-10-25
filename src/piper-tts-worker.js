@@ -1,4 +1,5 @@
 import { PiperTTSProvider } from "./piper-tts.js";
+import { serializeErrorDiagnostics } from "./error-diagnostics.js";
 
 export function attachPiperWorker(scope, provider = new PiperTTSProvider()) {
   let wasmPaths = null;
@@ -24,12 +25,14 @@ export function attachPiperWorker(scope, provider = new PiperTTSProvider()) {
       } else throw new Error(`Comando Piper desconocido: ${type}`);
       scope.postMessage({ id, type: "result", value });
     } catch (error) {
+      const diagnostics = serializeErrorDiagnostics(error);
       scope.postMessage({
         id,
         type: "error",
-        code: error?.code || "PIPER_WORKER_OPERATION_FAILED",
-        phase: error?.phase || null,
-        message: error?.message || "Falló el motor Piper local."
+        code: diagnostics.code || "PIPER_WORKER_OPERATION_FAILED",
+        phase: diagnostics.phase || null,
+        message: diagnostics.message || "Falló el motor Piper local.",
+        diagnostics
       });
     }
   };
