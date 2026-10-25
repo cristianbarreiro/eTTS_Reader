@@ -22,6 +22,15 @@ let contextRevision = 0;
 let contextRequestSequence = 0;
 const documentTokens = new Map();
 
+function selectionUnavailableMessage({ googleDocs = false, authorizedTab = false } = {}) {
+  if (googleDocs) {
+    return "Google Docs no expone esta selección del editor a la extensión. Para importar solo ese pasaje, selecciónalo en Docs, pulsa Ctrl+C y pégalo en el editor de eTTS con Ctrl+V. «Importar pestaña» puede recuperar texto visible accesible, pero podría ser parcial; activar la compatibilidad con lectores de pantalla en Herramientas > Configuración de accesibilidad puede ayudar. Para el documento completo, descárgalo como DOCX/PDF.";
+  }
+  return authorizedTab
+    ? "No hay texto seleccionado disponible en la pestaña autorizada. Selecciona texto en la página o usa el menú contextual ‘Enviar selección al lector local’."
+    : "No hay texto seleccionado disponible. Selecciona texto en la página o usa el menú contextual «Enviar selección al lector local».";
+}
+
 async function hasOffscreenDocument() {
   if (chrome.runtime.getContexts) {
     const contexts = await chrome.runtime.getContexts({
@@ -211,6 +220,7 @@ async function describeActiveTab(tab, { forceNewDocument = false, faviconChanged
   }
   if (classification.kind === "pdf") base.contentType = "PDF detectado";
   else if (classification.kind === "google-docs") base.contentType = "Google Docs";
+  else if (classification.kind === "office-online") base.contentType = "Office en línea";
   else if (classification.kind === "text-document") base.contentType = "Documento de texto";
   else if (classification.kind === "local-text-document") {
     return { ...base, state: "local-document", contentType: "Archivo local", accessState: "Acceso del visor no confirmado", availability: "Usa el selector de archivos.", importable: false, sitePermissionGranted: false };
@@ -484,10 +494,15 @@ async function extractCurrentTab(selectionOnly, expectedContext, operationId) {
     const text = page.text.replace(/\u0000/g, "");
     if (!text.trim()) {
       const state = selectionOnly ? "no-selection" : "no-text";
-      const message = selectionOnly
-        ? "No hay texto seleccionado disponible. Selecciona texto en la página o usa el menú contextual «Enviar selección al lector local»."
+      const googleDocsSelection = selectionOnly && (classification.kind === "google-docs" || page.sourceApp === "google-docs");
+      const message = googleDocsSelection
+        ? selectionUnavailableMessage({ googleDocs: true })
+        : selectionOnly
+          ? selectionUnavailableMessage()
         : page.type === "google-docs"
           ? "Google Docs no expuso texto accesible en esta vista. Prueba Importar selección, copia y pega el texto o descarga DOCX/PDF."
+          : page.type === "office-online"
+            ? "Office en línea no expuso texto accesible en esta vista. Prueba Importar selección o descarga DOCX/PDF y cárgalo con el selector."
           : "No se encontró texto accesible. Usa el archivo original o pega el texto en el editor.";
       return { ok: false, state, type: page.type || classification.kind, title: page.title || context.title, operationId, message };
     }
@@ -497,10 +512,15 @@ async function extractCurrentTab(selectionOnly, expectedContext, operationId) {
       sourceUrl: safeSourceUrl(context.url), type: page.type || classification.kind,
       coverage: page.coverage || "page-text", visiblePageCount: Number(page.visiblePageCount) || 0,
       inaccessibleFrameCount: Number(page.inaccessibleFrameCount) || 0,
+      selectionFallback: Boolean(page.selectionFallback), sourceApp: page.sourceApp || "",
       characters: limited.length, truncated: Boolean(page.truncated || text.length > 200_000),
       text: limited, operationId,
-      message: page.type === "google-docs-visible"
+      message: page.selectionFallback
+        ? `La aplicación no expuso el documento completo; se encontró solo el texto seleccionado${page.sourceApp === "google-docs" ? " en Google Docs" : " en Office en línea"}. Revisa la vista previa.`
+        : page.type === "google-docs-visible"
         ? "Google Docs: se obtuvo solo el texto visible y accesible en esta vista. Para una copia completa, descarga DOCX/PDF."
+        : page.type === "office-online-visible"
+          ? "Office en línea: se obtuvo el texto accesible de la vista actual. Revisa la vista previa; puede que no incluya páginas aún no expuestas."
         : selectionOnly
           ? "Selección recibida desde la pestaña activa. Revisa el texto antes de importarlo."
           : "Extracción completada. Revisa el texto antes de importarlo."
@@ -574,15 +594,19 @@ async function extractAuthorizedTab(selectionOnly) {
     const text = page.text.replace(/\u0000/g, "");
     if (!text.trim()) {
       const state = selectionOnly ? "no-selection" : "no-text";
-      const message = page.type === "google-docs"
+      const googleDocsSelection = selectionOnly && (classification.kind === "google-docs" || page.sourceApp === "google-docs");
+      const message = googleDocsSelection
+        ? selectionUnavailableMessage({ googleDocs: true })
+        : page.type === "google-docs"
         ? "Google Docs no expuso texto accesible del documento en esta vista. Prueba Importar selección, copia y pega el texto o descarga el archivo como DOCX/PDF."
+        : page.type === "office-online"
+          ? "Office en línea no expuso texto accesible del documento en esta vista. Prueba Importar selección o descarga el archivo como DOCX/PDF."
         : selectionOnly
-          ? "No hay texto seleccionado disponible en la pestaña autorizada. Selecciona texto en la página o usa el menú contextual ‘Enviar selección al lector local’."
+          ? selectionUnavailableMessage({ authorizedTab: true })
           : "No se encontró texto accesible. Puede ser un visor protegido o una aplicación que dibuja el documento en un canvas; usa el archivo original o pega el texto.";
       return { ok: false, state, type: page.type || classification.kind, title: page.title || tab.title || target.title, sourceUrl: safeSourceUrl(tab.url), message };
     }
     const limited = text.slice(0, 200_000);
-    const googleDocsPartial = page.type === "google-docs-visible";
     return {
       ok: true,
       state: "complete",
@@ -592,11 +616,17 @@ async function extractAuthorizedTab(selectionOnly) {
       coverage: page.coverage || "page-text",
       visiblePageCount: Number(page.visiblePageCount) || 0,
       inaccessibleFrameCount: Number(page.inaccessibleFrameCount) || 0,
+      selectionFallback: Boolean(page.selectionFallback),
+      sourceApp: page.sourceApp || "",
       characters: limited.length,
       truncated: Boolean(page.truncated || text.length > 200_000),
       text: limited,
-      message: googleDocsPartial
+      message: page.selectionFallback
+        ? `La aplicación no expuso el documento completo; se encontró solo el texto seleccionado${page.sourceApp === "google-docs" ? " en Google Docs" : " en Office en línea"}. Revisa la vista previa.`
+        : page.type === "google-docs-visible"
         ? "Google Docs: se obtuvo solo el texto visible y accesible en esta vista; no se garantiza el documento completo. Para una copia completa, descárgalo como DOCX/PDF."
+        : page.type === "office-online-visible"
+          ? "Office en línea: se obtuvo el texto accesible de la vista actual; puede que no incluya páginas aún no expuestas. Para una copia completa, descarga DOCX/PDF."
         : selectionOnly
           ? "Selección recibida desde la pestaña autorizada. Revisa el texto antes de importarlo."
           : "Extracción completada. Revisa el texto antes de importarlo."

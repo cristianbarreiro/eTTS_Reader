@@ -153,6 +153,102 @@ test("toolbar invocation captures the source tab and extracts only from that aut
   } finally { harness.restore(); }
 });
 
+test("a Docs selection fallback is returned as selection-only text, not as the whole document", async () => {
+  const tab = { id: 57, windowId: 2, url: "https://docs.google.com/document/d/123/edit", title: "Project notes" };
+  const harness = await loadBackground({
+    initialTab: tab,
+    hostPermissions: ["https://docs.google.com/*"],
+    scriptResult: {
+      title: tab.title, contentType: "text/html", type: "selection", coverage: "selection",
+      selectionFallback: true, sourceApp: "google-docs", text: "Selected paragraph only.", truncated: false
+    }
+  });
+  try {
+    harness.api.action.onClicked.fire(tab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await harness.send({ target: "background", command: "extract-tab" });
+    assert.equal(result.ok, true);
+    assert.equal(result.type, "selection");
+    assert.equal(result.text, "Selected paragraph only.");
+    assert.match(result.message, /solo el texto seleccionado/);
+    assert.equal(result.selectionFallback, true);
+  } finally { harness.restore(); }
+});
+
+test("empty Google Docs selections give copy/paste guidance instead of repeating the ineffective context-menu suggestion", async () => {
+  const tab = { id: 60, windowId: 2, url: "https://docs.google.com/document/d/789/edit", title: "Project notes" };
+  const harness = await loadBackground({
+    initialTab: tab,
+    hostPermissions: ["https://docs.google.com/*"],
+    scriptResult: {
+      title: tab.title, contentType: "text/html", type: "selection", sourceApp: "google-docs", text: "", truncated: false
+    }
+  });
+  try {
+    const active = await harness.send({ target: "background", command: "get-active-tab-context" });
+    const currentTabResult = await harness.send({
+      target: "background", command: "extract-current-tab", selectionOnly: true, context: active.context, operationId: 61
+    });
+    assert.equal(currentTabResult.state, "no-selection");
+    assert.match(currentTabResult.message, /Google Docs no expone esta selección/);
+    assert.match(currentTabResult.message, /Ctrl\+C.*Ctrl\+V/);
+    assert.doesNotMatch(currentTabResult.message, /menú contextual/);
+
+    harness.api.action.onClicked.fire(tab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const authorizedResult = await harness.send({ target: "background", command: "extract-tab", selectionOnly: true });
+    assert.equal(authorizedResult.state, "no-selection");
+    assert.match(authorizedResult.message, /Google Docs no expone esta selección/);
+    assert.match(authorizedResult.message, /DOCX\/PDF/);
+    assert.doesNotMatch(authorizedResult.message, /menú contextual/);
+  } finally { harness.restore(); }
+});
+
+test("an inaccessible Office document explains the selection and local-file recovery paths", async () => {
+  const tab = { id: 58, windowId: 2, url: "https://word.office.com/DocumentEditor", title: "Report" };
+  const harness = await loadBackground({
+    initialTab: tab,
+    hostPermissions: ["https://word.office.com/*"],
+    scriptResult: { title: tab.title, contentType: "text/html", type: "office-online", text: "", truncated: false }
+  });
+  try {
+    harness.api.action.onClicked.fire(tab);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await harness.send({ target: "background", command: "extract-tab" });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "no-text");
+    assert.match(result.message, /Office en línea/);
+    assert.match(result.message, /Importar selección/);
+    assert.match(result.message, /DOCX\/PDF/);
+  } finally { harness.restore(); }
+});
+
+test("current-tab import preserves the partial-coverage warning for Docs fallback text", async () => {
+  const tab = { id: 59, windowId: 2, url: "https://docs.google.com/document/d/456/edit", title: "Lecture notes" };
+  const harness = await loadBackground({
+    initialTab: tab,
+    tabsPermissionGranted: true,
+    hostPermissions: ["https://docs.google.com/*"],
+    scriptResult: {
+      title: tab.title, contentType: "text/html", type: "selection", coverage: "selection",
+      selectionFallback: true, sourceApp: "google-docs", text: "One selected line.", truncated: false
+    }
+  });
+  try {
+    const enabled = await harness.send({ target: "background", command: "set-follow-active-tab", enabled: true });
+    const result = await harness.send({
+      target: "background", command: "extract-current-tab", selectionOnly: false,
+      context: enabled.context, operationId: 60
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.operationId, 60);
+    assert.equal(result.type, "selection");
+    assert.equal(result.text, "One selected line.");
+    assert.match(result.message, /no expuso el documento completo/);
+    assert.equal(result.selectionFallback, true);
+  } finally { harness.restore(); }
+});
+
 test("a changed active tab or navigated source is rejected before importing its content", async () => {
   const harness = await loadBackground();
   try {

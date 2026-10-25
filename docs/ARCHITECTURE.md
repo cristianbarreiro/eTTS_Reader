@@ -112,7 +112,7 @@ Las sesiones que usan IDs antiguos `system:` se migran al proveedor local defini
 
 La extracción de páginas ocurre solo tras una acción explícita del usuario. El background captura y valida la pestaña autorizada y enruta la extracción al contexto adecuado. Los permisos de hosts y `tabs` son opcionales cuando así lo define `manifest.json`; no los amplíes globalmente para simplificar una función.
 
-PDF, DOCX, TXT y Markdown se procesan localmente según los límites definidos en README. Google Docs y páginas restringidas tienen limitaciones documentadas; no afirmes que la extracción obtiene contenido inaccesible o todo el documento si no lo verifica.
+PDF, DOCX, TXT y Markdown se procesan localmente según los límites definidos en README. Google Docs y Word en línea pueden exponer solo texto accesible de las páginas visibles o la selección actual; la vista previa debe indicar ese alcance y no presentarlo como el documento completo. Para una copia completa, ofrece el archivo DOCX/PDF local como alternativa. No afirmes que la extracción obtiene contenido inaccesible o todo el documento si no lo verifica.
 
 ## 7. Build y recursos empaquetados
 

@@ -27,6 +27,24 @@ function extensionFromUrl(value) {
   }
 }
 
+function isOfficeOnlineDocument(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname;
+    const wordEditor = /(^|\.)word\.(?:office\.com|cloud\.microsoft)$/i.test(host)
+      || /(^|\.)officeapps\.live\.com$/i.test(host)
+      || /(^|\.)office\.live\.com$/i.test(host) && /word/i.test(path)
+      || /(^|\.)office\.com$/i.test(host) && /\/(?:launch\/)?word(?:\/|$)/i.test(path);
+    const sharePointWord = /(^|\.)sharepoint\.com$/i.test(host)
+      && /(?:\/:w:\/|\/_layouts\/\d+\/doc\.aspx|\/word\/)/i.test(path);
+    const oneDriveWord = host === "onedrive.live.com" && /\/(?:edit\.aspx|word|document)(?:\/|$)/i.test(path);
+    return wordEditor || sharePointWord || oneDriveWord;
+  } catch {
+    return false;
+  }
+}
+
 export function classifyTab(tab) {
   const value = tab?.url;
   if (!value) {
@@ -49,6 +67,9 @@ export function classifyTab(tab) {
   }
   if (url.hostname === "docs.google.com" && /^\/document\//i.test(url.pathname)) {
     return { kind: "google-docs", message: "Google Docs expone parte del contenido mediante una capa de edición propia." };
+  }
+  if (isOfficeOnlineDocument(value)) {
+    return { kind: "office-online", message: "Documento de Word en línea. Se leerá solo el texto que esta vista exponga localmente." };
   }
   if (url.protocol === "file:") {
     const extension = extensionFromUrl(value);
@@ -95,52 +116,92 @@ export function extractReadablePage({ selectionOnly = false, maxCharacters = MAX
   const limit = Math.max(1, Number(maxCharacters) || 1);
   const title = String(doc?.title || "").slice(0, 500);
   const contentType = doc?.contentType || "";
+  const hostname = String(win?.location?.hostname || "").toLowerCase();
+  const pathname = String(win?.location?.pathname || "");
+  const isGoogleDocs = /(^|\.)docs\.google\.com$/i.test(hostname);
   if (!doc?.body) return { title, contentType, type: "web-page", text: "", truncated: false };
 
+  const readSelection = () => {
+    const windows = [win];
+    for (const frame of Array.from(doc.querySelectorAll?.("iframe") || [])) {
+      try {
+        const frameWindow = frame.contentWindow;
+        if (frameWindow?.location?.origin === win?.location?.origin) windows.push(frameWindow);
+      } catch { /* Cross-origin frames are outside the page's readable scope. */ }
+    }
+    for (const targetWindow of windows) {
+      try {
+        const selected = String(targetWindow?.getSelection?.()?.toString?.() || "").replace(/\r\n?/g, "\n");
+        if (selected.trim()) return selected;
+      } catch { /* A frame selection may disappear while the application changes focus. */ }
+    }
+    return "";
+  };
+
   if (selectionOnly) {
-    const selected = String(win?.getSelection?.()?.toString?.() || "").replace(/\r\n?/g, "\n");
+    const selected = readSelection();
     return {
       title,
       contentType,
       type: "selection",
+      ...(isGoogleDocs ? { sourceApp: "google-docs" } : {}),
       text: selected.slice(0, limit),
       truncated: selected.length > limit
     };
   }
 
-  const isGoogleDocs = /(^|\.)docs\.google\.com$/i.test(String(win?.location?.hostname || ""));
-  if (isGoogleDocs) {
-    const visible = (node) => {
-      if (!node || node.hasAttribute?.("aria-hidden") || node.closest?.("[aria-hidden='true']")) return false;
-      try {
-        const ownerWindow = node.ownerDocument?.defaultView || win;
-        const style = ownerWindow?.getComputedStyle?.(node);
-        const rect = node.getBoundingClientRect?.();
-        if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
-        if (rect && (rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= (ownerWindow?.innerHeight || 0))) return false;
-      } catch { return false; }
-      return true;
-    };
-    const roots = [doc];
-    let inaccessibleFrameCount = 0;
+  const isOfficeOnline = /(^|\.)word\.(?:office\.com|cloud\.microsoft)$/i.test(hostname)
+    || /(^|\.)officeapps\.live\.com$/i.test(hostname)
+    || /(^|\.)office\.live\.com$/i.test(hostname) && /word/i.test(pathname)
+    || /(^|\.)office\.com$/i.test(hostname) && /\/(?:launch\/)?word(?:\/|$)/i.test(pathname)
+    || /(^|\.)sharepoint\.com$/i.test(hostname) && /(?:\/:w:\/|\/_layouts\/\d+\/doc\.aspx|\/word\/)/i.test(pathname)
+    || hostname === "onedrive.live.com" && /\/(?:edit\.aspx|word|document)(?:\/|$)/i.test(pathname);
+  const isDocumentApp = isGoogleDocs || isOfficeOnline;
+  const visible = (node) => {
+    if (!node || node.hasAttribute?.("aria-hidden") || node.closest?.("[aria-hidden='true']")) return false;
+    try {
+      const ownerWindow = node.ownerDocument?.defaultView || win;
+      const style = ownerWindow?.getComputedStyle?.(node);
+      const rect = node.getBoundingClientRect?.();
+      if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+      if (rect && (rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= (ownerWindow?.innerHeight || 0))) return false;
+    } catch { return false; }
+    return true;
+  };
+  const appRoots = isDocumentApp ? [doc] : null;
+  let inaccessibleFrameCount = 0;
+  if (isDocumentApp) {
     for (const frame of Array.from(doc.querySelectorAll("iframe") || [])) {
       if (!visible(frame)) continue;
       try {
         const frameDocument = frame.contentDocument;
         const sameOrigin = frameDocument?.defaultView?.location?.origin === win.location.origin;
-        if (sameOrigin && frameDocument.documentElement) roots.push(frameDocument);
+        if (sameOrigin && frameDocument.documentElement) appRoots.push(frameDocument);
         else inaccessibleFrameCount++;
       } catch { inaccessibleFrameCount++; }
     }
+  }
+
+  if (isGoogleDocs) {
+    const roots = appRoots;
     const collectVisible = (selector) => roots.flatMap((root) => Array.from(root.querySelectorAll(selector) || []).filter(visible));
     const pageNodes = collectVisible(".kix-page");
     const lineNodes = collectVisible(".kix-lineview-text-block");
     const wordNodes = lineNodes.length ? [] : collectVisible(".kix-wordhtmlgenerator-word-node");
     const contentNodes = lineNodes.length ? lineNodes : wordNodes;
-    let raw = contentNodes.map((node) => String(node.innerText || node.textContent || "").trim()).filter(Boolean).join("\n");
+    const accessibleNodes = contentNodes.length ? [] : collectVisible("[role='document'], [role='textbox'], [contenteditable='true']");
+    let raw = [...contentNodes, ...accessibleNodes].map((node) => String(node.innerText || node.textContent || "").trim()).filter(Boolean).join("\n");
     if (!raw && pageNodes.length) raw = pageNodes.map((node) => String(node.innerText || node.textContent || "").trim()).filter(Boolean).join("\n\n");
     const normalized = raw.replace(/\r\n?/g, "\n").replace(/[\u00a0\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
     const text = normalized.slice(0, limit);
+    if (!text) {
+      const selected = readSelection();
+      if (selected.trim()) return {
+        title, contentType, type: "selection", coverage: "selection", selectionFallback: true,
+        sourceApp: "google-docs", text: selected.slice(0, limit), truncated: selected.length > limit,
+        inaccessibleFrameCount
+      };
+    }
     return {
       title,
       contentType,
@@ -203,6 +264,50 @@ export function extractReadablePage({ selectionOnly = false, maxCharacters = MAX
       .replace(/\n{3,}/g, "\n\n")
       .trim()
       .slice(0, limit);
+  }
+
+  if (isOfficeOnline) {
+    const selectorGroups = [
+      ["[role='document']"],
+      ["[contenteditable='true']"],
+      ["[role='textbox']"],
+      [".WACViewPanel_Editing", "#WACViewPanel_Editing"],
+      ["main", "[role='main']"]
+    ];
+    let best = "";
+    let pageCount = 0;
+    for (const selectors of selectorGroups) {
+      const candidates = appRoots.flatMap((root) => selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector) || [])))
+        .filter(visible);
+      let groupBest = "";
+      for (const candidate of candidates) {
+        const candidateText = pageText(candidate);
+        if (candidateText.length > groupBest.length) groupBest = candidateText;
+      }
+      if (groupBest) {
+        best = groupBest;
+        pageCount = candidates.length;
+        break;
+      }
+    }
+    const text = best.slice(0, limit);
+    if (!text) {
+      const selected = readSelection();
+      if (selected.trim()) return {
+        title, contentType, type: "selection", coverage: "selection", selectionFallback: true,
+        sourceApp: "office-online", text: selected.slice(0, limit), truncated: selected.length > limit,
+        inaccessibleFrameCount
+      };
+    }
+    return {
+      title, contentType,
+      type: text ? "office-online-visible" : "office-online",
+      coverage: text ? "visible-pages" : "not-exposed",
+      visiblePageCount: pageCount,
+      inaccessibleFrameCount,
+      text,
+      truncated: best.length > limit
+    };
   }
 
   let text = "";
@@ -579,16 +684,28 @@ export async function importCurrentTab({
       const state = selectionOnly ? "no-selection" : "no-text";
       const message = selectionOnly
         ? "No hay texto seleccionado en esta pestaña. Selecciona texto visible y vuelve a intentarlo."
-        : "No se encontró texto accesible. Puede ser un visor protegido o una aplicación que dibuja el documento en un canvas; usa el archivo original o pega el texto.";
+        : page.type === "google-docs"
+          ? "Google Docs no expuso el texto del documento en esta vista. Prueba Importar selección o descarga el documento como DOCX/PDF."
+          : page.type === "office-online"
+            ? "Office en línea no expuso texto del documento en esta vista. Prueba Importar selección o descarga el documento como DOCX/PDF."
+            : "No se encontró texto accesible. Puede ser un visor protegido o una aplicación que dibuja el documento en un canvas; usa el archivo original o pega el texto.";
       return errorResult(state, message, tab, selectionOnly ? "selection" : classification.kind);
     }
     const safeText = text.slice(0, maxCharacters);
     const kind = selectionOnly ? "selection" : page.type || (plain ? "text-document" : "web-page");
+    const selectionFallback = Boolean(page.selectionFallback);
     return {
       ok: true, state: "complete", title: page.title || tab.title || "Pestaña actual",
       sourceUrl: safeSourceUrl(tab.url), type: kind, contentType: page.contentType || "",
+      coverage: page.coverage || "page-text", selectionFallback,
       text: safeText, characters: safeText.length, truncated: Boolean(page.truncated || text.length > maxCharacters),
-      message: selectionOnly
+      message: selectionFallback
+        ? `La aplicación no expuso el documento completo; se encontró solo el texto seleccionado${page.sourceApp === "google-docs" ? " en Google Docs" : " en Office en línea"}. Revisa la vista previa.`
+        : page.type === "google-docs-visible"
+          ? "Google Docs: se obtuvo solo el texto visible y accesible en esta vista. Para una copia completa, descarga DOCX/PDF."
+          : page.type === "office-online-visible"
+            ? "Office en línea: se obtuvo el texto accesible de la vista actual. Revisa la vista previa; puede que no incluya páginas aún no expuestas."
+        : selectionOnly
         ? "Texto seleccionado disponible. Revisa el resultado antes de importarlo."
         : page.truncated || text.length > maxCharacters
         ? `Extracción completada; se limitaron los primeros ${maxCharacters.toLocaleString()} caracteres.`

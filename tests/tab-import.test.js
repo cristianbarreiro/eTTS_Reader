@@ -18,6 +18,8 @@ test("tab classification separates web, text files, PDFs, local files, and restr
   assert.equal(classifyTab({ url: "https://example.test/readme.md" }).kind, "text-document");
   assert.equal(classifyTab({ url: "https://example.test/report.pdf?download=1" }).kind, "pdf");
   assert.equal(classifyTab({ url: "https://docs.google.com/document/d/123/edit" }).kind, "google-docs");
+  assert.equal(classifyTab({ url: "https://word.office.com/DocumentEditor" }).kind, "office-online");
+  assert.equal(classifyTab({ url: "https://contoso.sharepoint.com/:w:/r/sites/team/report.docx" }).kind, "office-online");
   assert.equal(classifyTab({ url: "file:///C:/docs/report.pdf" }).kind, "local-pdf");
   assert.equal(classifyTab({ url: "file:///C:/docs/readme.txt" }).kind, "local-text-document");
   assert.equal(classifyTab({ url: "file:///C:/docs/index.html" }).kind, "local-text-document");
@@ -93,6 +95,45 @@ test("Google Docs returns only visible accessible page text and marks it partial
   assert.equal(output.coverage, "visible-pages");
   assert.equal(output.text, "Visible document line.");
   assert.doesNotMatch(output.text, /Hidden duplicate|Google Docs/);
+});
+
+test("Google Docs falls back to the selected text and marks it as selection-only", () => {
+  const body = element("body", {}, [element("div", { class: "kix-appview-editor" }, [])]);
+  const output = withFakePage({ title: "Project notes", contentType: "text/html", body, selection: "Selected paragraph only.", hostname: "docs.google.com" }, () => extractReadablePage());
+  assert.equal(output.type, "selection");
+  assert.equal(output.coverage, "selection");
+  assert.equal(output.selectionFallback, true);
+  assert.equal(output.sourceApp, "google-docs");
+  assert.equal(output.text, "Selected paragraph only.");
+});
+
+test("Google Docs marks an unavailable canvas selection so the UI can show the right recovery steps", () => {
+  const body = element("body", {}, [element("div", { class: "kix-appview-editor" }, [])]);
+  const output = withFakePage({ title: "Project notes", contentType: "text/html", body, hostname: "docs.google.com" }, () => extractReadablePage({ selectionOnly: true }));
+  assert.equal(output.type, "selection");
+  assert.equal(output.sourceApp, "google-docs");
+  assert.equal(output.text, "");
+});
+
+test("Office online prefers accessible document content and excludes toolbar text", () => {
+  const body = element("body", {}, [
+    element("div", { role: "toolbar" }, [text("Home Insert Layout")]),
+    element("div", { role: "document" }, [element("p", {}, [text("Accessible Word document paragraph. ".repeat(4))])])
+  ]);
+  const output = withFakePage({ title: "Report", contentType: "text/html", body, hostname: "word.office.com" }, () => extractReadablePage());
+  assert.equal(output.type, "office-online-visible");
+  assert.equal(output.coverage, "visible-pages");
+  assert.match(output.text, /Accessible Word document paragraph/);
+  assert.doesNotMatch(output.text, /Home Insert Layout/);
+});
+
+test("Office online marks a captured selection as partial when document text is inaccessible", () => {
+  const body = element("body", {}, [element("div", { class: "canvas-root" }, [element("canvas", {}, [])])]);
+  const output = withFakePage({ title: "Report", contentType: "text/html", body, selection: "Selected Word text.", hostname: "word.office.com" }, () => extractReadablePage());
+  assert.equal(output.type, "selection");
+  assert.equal(output.selectionFallback, true);
+  assert.equal(output.sourceApp, "office-online");
+  assert.equal(output.text, "Selected Word text.");
 });
 
 test("web page extraction uses the active tab on demand and does not fetch the site", async () => {
@@ -519,8 +560,10 @@ function element(tagName, attributes = {}, children = []) {
       visit(this);
       return descendants.filter((child) => selectors.some((item) => {
         const roleMatch = item.match(/^\[role=['"]([^'"]+)['"]\]$/);
+        const attributeMatch = item.match(/^\[([\w-]+)=['"]([^'"]+)['"]\]$/);
         const classMatch = item.match(/^\.([\w-]+)$/);
         return roleMatch ? child.getAttribute("role") === roleMatch[1]
+          : attributeMatch ? child.getAttribute(attributeMatch[1]) === attributeMatch[2]
           : classMatch ? String(child.getAttribute("class") || "").split(/\s+/).includes(classMatch[1])
             : child.tagName.toLowerCase() === item;
       }));
@@ -533,7 +576,7 @@ function element(tagName, attributes = {}, children = []) {
   return node;
 }
 
-function withFakePage({ title, contentType, body, selection = "", documentElement = null, xmlText = "", hostname = "example.test" }, run) {
+function withFakePage({ title, contentType, body, selection = "", documentElement = null, xmlText = "", hostname = "example.test", pathname = "/" }, run) {
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
   body.ownerDocument = null;
@@ -544,7 +587,7 @@ function withFakePage({ title, contentType, body, selection = "", documentElemen
   };
   globalThis.document = doc;
   globalThis.window = {
-    location: { hostname },
+    location: { hostname, pathname, origin: `https://${hostname}` },
     getSelection: () => ({ toString: () => selection }),
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
     XMLSerializer: class { serializeToString() { return xmlText; } }

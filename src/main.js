@@ -768,6 +768,7 @@ async function refreshLibrary() {
   const typeText = (type) => ({
     text: "Texto pegado", pdf: "PDF", docx: "DOCX", txt: "TXT", md: "Markdown", markdown: "Markdown",
     article: "Artículo web", "main-content": "Página web", "web-page": "Página web", "google-docs-visible": "Google Docs · páginas visibles",
+    "office-online-visible": "Office en línea · texto visible", "office-online": "Office en línea",
     selection: "Selección web", combined: "Texto combinado", recovered: "Texto recuperado"
   })[type] || String(type || "Documento").toUpperCase();
   const sessionState = (status) => ({
@@ -917,6 +918,7 @@ function tabImportTypeLabel(type) {
     article: "artículo web", "main-content": "contenido principal", "web-page": "página web",
     "text-document": "documento de texto", pdf: "PDF", selection: "selección de texto",
     "google-docs-visible": "Google Docs · texto visible", "google-docs": "Google Docs",
+    "office-online-visible": "Office en línea · texto visible", "office-online": "Office en línea",
     restricted: "pestaña restringida", "permission-required": "permiso temporal requerido",
     "local-pdf": "PDF local", "local-document": "archivo local"
   })[type] || type || "contenido de pestaña";

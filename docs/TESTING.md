@@ -102,6 +102,7 @@ Por cada voz Piper soportada en el catálogo:
 3. Verifica que cambiar de pestaña no sobrescribe el editor ni reinicia una sesión.
 4. Prueba archivos locales solo después de activar el permiso de acceso a URLs de archivo si Edge lo requiere.
 5. Comprueba estados de permiso denegado, pestañas restringidas y errores de extracción, asegurando que el texto actual no se pierde.
+6. En Google Docs y Word en línea, comprueba que la vista previa marque el texto visible como parcial y que, cuando solo se exponga una selección, indique que no representa el documento entero. Si Google Docs no expone la selección del lienzo, el mensaje debe recomendar copiarla y pegarla en el editor, ofrecer Importar pestaña como extracción posiblemente parcial y recomendar DOCX/PDF para el documento completo; no debe insistir en el menú contextual para esa selección vacía.
 
 ### UI y accesibilidad
 
