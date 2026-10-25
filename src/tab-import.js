@@ -150,6 +150,9 @@ export function extractReadablePage({ selectionOnly = false, maxCharacters = MAX
     };
   }
 
+  const hostname = String(win?.location?.hostname || "").toLowerCase();
+  const pathname = String(win?.location?.pathname || "");
+  const isGoogleDocs = /(^|\.)docs\.google\.com$/i.test(hostname);
   const isOfficeOnline = /(^|\.)word\.(?:office\.com|cloud\.microsoft)$/i.test(hostname)
     || /(^|\.)officeapps\.live\.com$/i.test(hostname)
     || /(^|\.)office\.live\.com$/i.test(hostname) && /word/i.test(pathname)
