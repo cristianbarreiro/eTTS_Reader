@@ -69,18 +69,19 @@ Por cada voz Piper soportada en el catálogo:
 2. Inicia la descarga explícitamente y revisa el progreso.
 3. Confirma que la voz cambia a estado preparado solo después de validar e instalar los recursos.
 4. Pulsa «Probar voz» con una muestra breve.
-5. Introduce texto español de prueba, carga la cola, inicia la lectura y comprueba pronunciación, continuidad entre fragmentos y ausencia de cortes evidentes.
-6. Comprueba pausa, reanudación, detención, fragmento anterior/siguiente, velocidad, barra de progreso y búsqueda temporal cuando haya duración disponible.
-7. Descarga el WAV y ábrelo en un reproductor independiente.
-8. Cierra y vuelve a abrir el Side Panel. Comprueba que el modelo sigue instalado y que una sesión puede recuperarse sin autoplay inesperado.
-9. Si está disponible un entorno controlado, desconecta la red después de completar la descarga y vuelve a sintetizar texto nuevo. La prueba debe demostrar que el flujo de inferencia usa recursos locales; no basta con reproducir un WAV que estaba en caché.
-10. Si se cancela o falla una descarga, verifica que se muestre el error y que el siguiente intento pueda recuperarse sin tratar un archivo incompleto como instalado.
-11. Si la inicialización de Piper deja de avanzar, confirma que la UI abandona «Preparando Piper…», permite reintentar y conserva el modelo verificado. La acción «Restablecer motor Piper» reconstruye el worker, pero debe permanecer bloqueada durante reproducción o una muestra activa.
+5. Introduce texto español de prueba y pulsa **Cargar al reproductor**. Comprueba que el primer WAV empieza a generarse, que el estado/progreso aparece en el Reproductor y que el audio no se reproduce todavía.
+6. Cuando el fragmento indique que está listo, pulsa **Play** y comprueba pronunciación, continuidad entre fragmentos y ausencia de cortes evidentes. Play debe reproducir el audio preparado sin volver a generarlo.
+7. Comprueba pausa, reanudación, detención, fragmento anterior/siguiente, velocidad, barra de progreso y búsqueda temporal cuando haya duración disponible.
+8. Descarga el WAV y ábrelo en un reproductor independiente.
+9. Cierra y vuelve a abrir el Side Panel. Comprueba que el modelo sigue instalado y que una sesión puede recuperarse sin autoplay inesperado.
+10. Si está disponible un entorno controlado, desconecta la red después de completar la descarga y vuelve a sintetizar texto nuevo. La prueba debe demostrar que el flujo de inferencia usa recursos locales; no basta con reproducir un WAV que estaba en caché.
+11. Si se cancela o falla una descarga, verifica que se muestre el error y que el siguiente intento pueda recuperarse sin tratar un archivo incompleto como instalado.
+12. Si la inicialización de Piper deja de avanzar, confirma que la UI abandona «Preparando Piper…», permite reintentar y conserva el modelo verificado. La acción «Restablecer motor Piper» reconstruye el worker, pero debe permanecer bloqueada durante reproducción o una muestra activa.
 
 ### Kokoro: no regresión
 
 1. Prepara el modelo desde la acción explícita de la interfaz.
-2. Prueba af_heart y am_michael.
+2. Pulsa **Cargar al reproductor** con una cola de texto y verifica que el primer WAV se prepara sin autoplay. Prueba también **Probar voz** con af_heart y am_michael.
 3. Verifica que generan WAV reproducibles y descargables.
 4. Confirma que cambiar una voz o proveedor no reutiliza audio incompatible.
 5. Revisa que eliminar recursos de Piper no elimine Kokoro y viceversa.

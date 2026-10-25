@@ -43,6 +43,8 @@ export class PlaybackController {
       duration: null,
       speed: 1,
       message: "",
+      generationProgress: null,
+      generationPhase: "",
       downloadUrl: null,
       downloadFilename: null,
       activeKind: null
@@ -139,8 +141,8 @@ export class PlaybackController {
     this.state.activeKind = null;
   }
 
-  _serializeSynthesis(text, voice) {
-    const task = this.synthesisTail.then(() => this.synthesize(text, { voice, speed: 1 }));
+  _serializeSynthesis(text, voice, onProgress = () => {}) {
+    const task = this.synthesisTail.then(() => this.synthesize(text, { voice, speed: 1, onProgress }));
     this.synthesisTail = task.catch(() => {});
     return task;
   }
@@ -213,6 +215,8 @@ export class PlaybackController {
     if (token !== this.operationId) return;
     this.state.status = "error";
     this.state.synthesisStatus = "idle";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
     this.state.playingIndex = null;
     this.state.message = error?.message || "No se pudo preparar o reproducir el audio.";
     this._publish();
@@ -230,6 +234,8 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = null;
     this.state.synthesisStatus = "idle";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
     this.state.status = chunks.length ? "text-ready" : "empty";
     this.state.message = chunks.length ? "Texto preparado para leer." : "Pega o carga texto para empezar.";
     this.restartOnPlay = false;
@@ -254,6 +260,8 @@ export class PlaybackController {
     this.state.speed = Number.isFinite(Number(speed)) ? Number(speed) : 1;
     this.audio.playbackRate = this.state.speed;
     this.state.synthesisStatus = "idle";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
     this.state.status = ["playing", "generating", "audio-ready", "interrupted"].includes(status)
       ? "interrupted"
       : status === "paused" || status === "error" || status === "stopped" || status === "completed"
@@ -316,6 +324,8 @@ export class PlaybackController {
     if (!preserveQueue) this.state.pendingChunkIndices = this.state.chunks.slice(index + 1).map((_, offset) => index + offset + 1);
     this.state.synthesisStatus = "generating";
     this.state.status = "generating";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "synthesis";
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[index] ?? null;
     this.state.message = `Generando el fragmento ${index + 1} de ${this.state.chunks.length}…`;
@@ -324,7 +334,21 @@ export class PlaybackController {
     this._publish();
 
     let task;
-    task = this._serializeSynthesis(text, voice).then(async (result) => {
+    const onProgress = (event = {}) => {
+      if (token !== this.operationId) return;
+      const phase = String(event.phase || (event.stage ? "initialize" : "synthesis"));
+      const rawProgress = Number.isFinite(event.progress)
+        ? event.progress
+        : Number.isFinite(event.loaded) && Number.isFinite(event.total) && event.total > 0
+          ? event.loaded / event.total * 100
+          : null;
+      this.state.generationPhase = phase;
+      this.state.generationProgress = rawProgress === null
+        ? null
+        : Math.max(0, Math.min(1, rawProgress / 100));
+      this._publish();
+    };
+    task = this._serializeSynthesis(text, voice, onProgress).then(async (result) => {
       if (token !== this.operationId) return false;
       await this.validateBlob(result);
       if (token !== this.operationId) return false;
@@ -336,6 +360,8 @@ export class PlaybackController {
       });
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
+      this.state.generationProgress = null;
+      this.state.generationPhase = "";
       this.state.message = `Fragmento ${index + 1} preparado.`;
       this._publish();
       return autoplay ? this._requestPlay(token) : true;
@@ -359,6 +385,8 @@ export class PlaybackController {
     this.state.playingIndex = null;
     this.state.synthesisStatus = "generating";
     this.state.status = "generating";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "synthesis";
     this.state.currentTime = 0;
     this.state.duration = null;
     this.state.message = "Generando muestra de voz local…";
@@ -368,13 +396,29 @@ export class PlaybackController {
     this._publish();
 
     let task;
-    task = this._serializeSynthesis(text, voice).then(async (result) => {
+    const onProgress = (event = {}) => {
+      if (token !== this.operationId) return;
+      const phase = String(event.phase || (event.stage ? "initialize" : "synthesis"));
+      const rawProgress = Number.isFinite(event.progress)
+        ? event.progress
+        : Number.isFinite(event.loaded) && Number.isFinite(event.total) && event.total > 0
+          ? event.loaded / event.total * 100
+          : null;
+      this.state.generationPhase = phase;
+      this.state.generationProgress = rawProgress === null
+        ? null
+        : Math.max(0, Math.min(1, rawProgress / 100));
+      this._publish();
+    };
+    task = this._serializeSynthesis(text, voice, onProgress).then(async (result) => {
       if (token !== this.operationId) return false;
       await this.validateBlob(result);
       if (token !== this.operationId) return false;
       this._activateBlob(result, { kind: "preview", filename, voice });
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
+      this.state.generationProgress = null;
+      this.state.generationPhase = "";
       this.state.message = "Muestra preparada.";
       this._publish();
       return this._requestPlay(token);
@@ -394,6 +438,15 @@ export class PlaybackController {
   async preview(text, { voice = "af_heart" } = {}) {
     if (!String(text).trim()) return false;
     return this._startPreview(text, { voice, filename: `muestra-${voice}.wav` });
+  }
+
+  async prepare() {
+    if (!this.state.chunks.length) return false;
+    if (["playing", "starting"].includes(this.state.status)) return false;
+    const index = this.state.selectedIndex;
+    if (this.state.status === "generating" && this.currentTask && this.currentTaskKey === `chunk:${index}`) return this.currentTask;
+    if (this.activeKind === "chunk" && this.activeIndex === index && this.activeUrl) return true;
+    return this._startChunk(index, { autoplay: false });
   }
 
   async play() {
@@ -456,6 +509,8 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[0] ?? null;
     this.state.synthesisStatus = "idle";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
     this.state.status = this.state.chunks.length ? "stopped" : "empty";
     this.state.message = this.state.chunks.length ? "Lectura detenida. La próxima reproducción empieza desde el principio." : "Pega o carga texto para empezar.";
     this.restartOnPlay = false;
@@ -476,6 +531,8 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[target] ?? null;
     this.state.synthesisStatus = "idle";
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
     this.pendingResumePosition = 0;
     this.state.status = "text-ready";
     this.state.message = `Seleccionado el fragmento ${target + 1} de ${this.state.chunks.length}.`;

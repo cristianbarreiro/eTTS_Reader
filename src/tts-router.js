@@ -19,7 +19,12 @@ export class TTSProviderRouter {
 
   async synthesize(text, voice, options = {}) {
     const provider = getVoiceProvider(voice);
-    if (provider === "kokoro") return this.kokoro.synthesize(text, voice);
+    if (provider === "kokoro") {
+      const reportProgress = (event) => options.onProgress?.({ ...event, phase: "initialize" });
+      await this.kokoro.initialize(reportProgress);
+      options.onProgress?.({ phase: "synthesis", stage: "synthesizing" });
+      return this.kokoro.synthesize(text, voice);
+    }
     return this.piper.synthesize(text, voice, options.onProgress);
   }
 

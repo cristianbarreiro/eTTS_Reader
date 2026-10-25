@@ -198,6 +198,36 @@ test("loading a prepared queue persists it without synthesizing or starting audi
   assert.deepEqual(calls, []);
 });
 
+test("prepare-audio synthesizes the first fragment in the offscreen engine without starting playback", async () => {
+  const repository = new MemoryRepository();
+  const calls = [];
+  const { audio, engine } = makeEngine(repository, calls);
+  const prepared = { ...session(), queuePrepared: true, queueVersion: "queue-v1" };
+  await engine.handleCommand({ command: "replace", session: prepared });
+
+  const started = await engine.handleCommand({ command: "prepare-audio", sessionId: prepared.id });
+  assert.equal(started.snapshot.status, "generating");
+  assert.equal(audio.playCount, 0);
+  assert.deepEqual(calls.map(({ text }) => text), ["First."]);
+
+  await waitFor(() => engine.player.snapshot().status === "audio-ready");
+  await waitFor(() => repository.sessions.get(prepared.id)?.audioKeys?.[0]);
+  assert.equal(audio.playCount, 0, "audio generation must never start playback");
+  assert.equal(engine.player.snapshot().hasDownloadableAudio, true);
+  assert.deepEqual(calls.map(({ text }) => text), ["First."]);
+});
+
+test("prepare-audio rejects stale or unprepared queue identifiers", async () => {
+  const repository = new MemoryRepository();
+  const { audio, engine } = makeEngine(repository);
+  const prepared = { ...session(), queuePrepared: true };
+  await engine.handleCommand({ command: "replace", session: prepared });
+
+  await assert.rejects(engine.handleCommand({ command: "prepare-audio", sessionId: "another-session" }), /no coincide/);
+  await assert.rejects(engine.handleCommand({ command: "prepare-audio", sessionId: "" }), /no coincide/);
+  assert.equal(audio.playCount, 0);
+});
+
 test("the persistent engine refuses to play an editor draft that was never loaded into the queue", async () => {
   const repository = new MemoryRepository();
   const calls = [];

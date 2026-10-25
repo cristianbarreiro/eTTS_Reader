@@ -792,7 +792,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const needsContext = [
       "start", "preview", "initialize", "restore", "piper-catalog", "piper-model-status",
-      "list-installed-piper-models", "install-piper-model", "delete-piper-model", "reset-piper-engine", "clear-audio-cache", "voice-preparation-status"
+      "prepare-audio", "list-installed-piper-models", "install-piper-model", "delete-piper-model", "reset-piper-engine", "clear-audio-cache", "voice-preparation-status"
     ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };

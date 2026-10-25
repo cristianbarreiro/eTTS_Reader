@@ -52,7 +52,7 @@ const ui = {
   engineState: $("#engine-state"), modelStatus: $("#model-status"), downloadProgress: $("#download-progress"), resetPiperEngine: $("#reset-piper-engine"),
   play: $("#play"), pause: $("#pause"), stop: $("#stop"), previous: $("#previous"), next: $("#next"),
   position: $("#position"), playerState: $("#player-state"), playbackStatus: $("#playback-status"),
-  progress: $("#read-progress"), progressFill: $("#read-progress-fill"), progressCaption: $("#progress-caption"),
+  progress: $("#read-progress"), progressFill: $("#read-progress-fill"), progressLabel: $("#progress-label"), progressCaption: $("#progress-caption"),
   elapsed: $("#elapsed"), duration: $("#duration"), durationSummary: $("#duration-summary"), seek: $("#seek"),
   downloadAudio: $("#download-audio"), clearText: $("#clear-text"), deleteAudioCache: $("#delete-audio-cache"), deleteModel: $("#delete-model"), deletePiperModel: $("#delete-piper-model"),
   storageUsage: $("#storage-usage"), modelManagement: $("#model-management")
@@ -108,6 +108,7 @@ let activeImportOperation = 0;
 let followChangeSequence = 0;
 let fileSelectionPurpose = "document";
 let queueLoadBusy = false;
+let pendingAudioPreparation = null;
 let staleQueueStopPending = false;
 let staleQueueStopPromise = null;
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -194,14 +195,33 @@ function updateQueueSyncUI(override = "") {
   const hasText = Boolean(ui.text.value.trim());
   const queue = player?.session;
   const matches = currentQueueMatchesEditor();
+  const snapshot = player?.snapshot();
   let message = override;
   let state = override ? "error" : "empty";
   if (!override && queueLoadBusy) {
     message = "Preparando la cola de reproducción…";
     state = "loading";
   } else if (!override && matches) {
-    message = "Cola cargada · el primer audio local se generará al reproducir.";
-    state = "current";
+    if (snapshot?.status === "generating") {
+      message = "Cola cargada · generando el primer audio local…";
+      state = "loading";
+    } else if (snapshot?.status === "audio-ready") {
+      message = "Audio preparado · pulsa Reproducir para escucharlo.";
+      state = "current";
+    } else if (pendingAudioPreparation?.sessionId === queue?.id) {
+      const voice = getVoiceRecord(pendingAudioPreparation.voice);
+      message = `Cola lista · descarga ${voice.label} para preparar el primer audio.`;
+      state = "ready";
+    } else if (snapshot?.status === "error") {
+      message = "No se pudo preparar el audio · vuelve a cargar el contenido para reintentarlo.";
+      state = "error";
+    } else if (snapshot?.status === "text-ready") {
+      message = "Cola lista · carga el contenido para preparar el audio antes de reproducir.";
+      state = "ready";
+    } else {
+      message = "Cola cargada · el audio está listo para reproducirse.";
+      state = "current";
+    }
   } else if (!override && queue?.id) {
     message = "El reproductor conserva una cola anterior. Carga el texto actual antes de reproducir.";
     state = "stale";
@@ -302,18 +322,23 @@ function modelLabel() {
 
 function describePlayer(snapshot) {
   const activeProvider = snapshot.activeProvider || getVoiceProvider(ui.voice.value);
-  if (snapshot.status === "text-ready" && modelState === "loading" && activeProvider === "kokoro") {
-    return "Preparando Kokoro local antes de generar el primer audio.";
+  if (snapshot.status === "text-ready" && snapshot.chunks.length) {
+    return pendingAudioPreparation?.sessionId === player.session?.id
+      ? "Descarga la voz local para que pueda prepararse el audio de esta cola."
+      : "Pulsa «Cargar al reproductor» para preparar el audio antes de reproducir.";
   }
-  if (snapshot.status === "text-ready" && snapshot.chunks.length) return "Cola preparada. El primer audio se generará al reproducir.";
   if (snapshot.status === "starting") return "Esperando la confirmación de inicio del proveedor de voz.";
   if (snapshot.status === "playing") {
     if (snapshot.activeKind === "preview") return "Muestra de voz local; la lectura del documento no cambia.";
     return "Audio WAV local del fragmento actual.";
   }
-  if (snapshot.status === "generating") return snapshot.activeKind === "preview"
-    ? "Preparando una muestra local de voz."
-    : `Síntesis del fragmento ${snapshot.selectedIndex + 1} de ${snapshot.chunks.length} en curso.`;
+  if (snapshot.status === "generating") {
+    if (snapshot.activeKind === "preview") return "Preparando una muestra local de voz.";
+    const fragment = `fragmento ${snapshot.selectedIndex + 1} de ${snapshot.chunks.length}`;
+    if (snapshot.generationPhase === "initialize") return `Preparando la voz local para generar el ${fragment}.`;
+    if (Number.isFinite(snapshot.generationProgress)) return `Generando el ${fragment} · ${Math.round(snapshot.generationProgress * 100)}%.`;
+    return `Generando el ${fragment}…`;
+  }
   if (snapshot.status === "audio-ready") return snapshot.activeKind === "preview"
     ? "La muestra local está lista para reproducirse."
     : "El audio del fragmento está listo para reproducirse o descargarse.";
@@ -343,9 +368,16 @@ function renderPlayer(snapshot) {
   ui.playerState.hidden = !headerState;
   ui.playerState.dataset.state = snapshot.status;
 
-  const progress = Number.isFinite(snapshot.totalProgress) ? snapshot.totalProgress : 0;
-  ui.progressFill.style.width = `${Math.round(progress * 100)}%`;
-  ui.progress.setAttribute("aria-valuenow", String(Math.round(progress * 100)));
+  const generationProgress = Number.isFinite(snapshot.generationProgress) ? snapshot.generationProgress : null;
+  const progress = isGenerating
+    ? generationProgress ?? 0
+    : Number.isFinite(snapshot.totalProgress) ? snapshot.totalProgress : 0;
+  ui.progress.classList.toggle("is-indeterminate", isGenerating && generationProgress === null);
+  ui.progressLabel.textContent = isGenerating ? "Preparación del audio" : "Progreso de lectura";
+  ui.progress.setAttribute("aria-label", isGenerating ? "Progreso de preparación del audio" : "Progreso de lectura por fragmentos");
+  ui.progressFill.style.width = `${isGenerating && generationProgress === null ? 28 : Math.round(progress * 100)}%`;
+  if (isGenerating && generationProgress === null) ui.progress.removeAttribute("aria-valuenow");
+  else ui.progress.setAttribute("aria-valuenow", String(Math.round(progress * 100)));
   const progressText = readingProgressCaption({ ...snapshot, activeProvider });
   ui.progress.setAttribute("aria-valuetext", progressText);
   ui.progressCaption.textContent = progressText;
@@ -366,7 +398,9 @@ function renderPlayer(snapshot) {
   ui.play.hidden = isPlaying;
   ui.pause.hidden = !isPlaying;
   const canResumePreview = snapshot.activeKind === "preview" && ["paused", "completed"].includes(snapshot.status) && controls.canTestVoice;
-  ui.play.disabled = (!controls.canPlay && !canResumePreview) || isGenerating;
+  const selectedAudioAvailable = Boolean(snapshot.hasDownloadableAudio || snapshot.currentAudioKey
+    || player.session?.audioKeys?.[snapshot.selectedIndex]);
+  ui.play.disabled = (!canResumePreview && (!controls.canPlay || !selectedAudioAvailable)) || isGenerating;
   ui.pause.disabled = !controls.canPause;
   ui.play.setAttribute("aria-label", snapshot.status === "paused" || snapshot.status === "interrupted" ? "Reanudar lectura"
     : snapshot.status === "completed" ? "Reproducir lectura desde el principio" : "Reproducir lectura");
@@ -686,7 +720,7 @@ async function loadEditorToPlayer() {
       await player.stop();
     }
     previousQueue = player.session ? { ...player.session } : null;
-    // Queue loading never downloads a model or synthesizes audio.
+    pendingAudioPreparation = null;
     await flushPersistence();
     const prepared = preparePlaybackQueue({
       editorSession: currentSession,
@@ -701,12 +735,20 @@ async function loadEditorToPlayer() {
     await player.replace(prepared);
     currentSession = player.session || prepared;
     editingForked = false;
+    if (getVoiceProvider(voice) === "piper" && !piperStates.get(voice)?.installed) {
+      pendingAudioPreparation = { sessionId: prepared.id, voice };
+      const voiceRecord = getVoiceRecord(voice);
+      ui.modelStatus.textContent = `Descarga ${voiceRecord.label} para preparar automáticamente el primer audio de esta cola.`;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    } else {
+      await prepareQueuedAudio(prepared.id, voice);
+    }
     await chrome.storage.local.set({
       ...(currentDocument?.id ? { lastDocumentId: currentDocument.id } : {}),
       lastSessionId: currentSession.id
     });
-    ui.queueSyncStatus.textContent = "Cola cargada · el primer audio local se generará al reproducir.";
-    ui.queueSyncStatus.dataset.state = "current";
+    updateQueueSyncUI();
     if (ui.library.open) await refreshLibrary();
     await refreshStorageUsage();
     return true;
@@ -722,27 +764,41 @@ async function loadEditorToPlayer() {
   }
 }
 
+async function prepareQueuedAudio(sessionId, voice) {
+  const queue = player.session;
+  if (!queue || queue.id !== sessionId || (queue.voice || queue.voiceId) !== voice
+      || ui.voice.value !== voice
+      || !playbackQueueMatchesEditor(queue, { text: ui.text.value, voice: ui.voice.value })) {
+    if (pendingAudioPreparation?.sessionId === sessionId) pendingAudioPreparation = null;
+    return false;
+  }
+  pendingAudioPreparation = null;
+  try {
+    await player.prepareAudio(sessionId);
+    return true;
+  } catch (error) {
+    showError(error, "playback");
+    return false;
+  }
+}
+
 async function startCurrentPlayback() {
+  if (player.snapshot().activeKind === "preview") {
+    await player.play();
+    return true;
+  }
   updateTextInfo();
   if (!playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) {
     updateQueueSyncUI("Carga el texto actual al reproductor antes de iniciar la lectura.");
     return false;
   }
   const queue = player.session;
-  const voice = queue.voice || queue.voiceId;
-  const provider = getVoiceProvider(voice);
-  const hasCachedAudio = Boolean(queue.audioKeys?.[player.snapshot().selectedIndex]);
-  const state = controlsModelState(voice);
-  if (!hasCachedAudio && state !== "ready") {
-    if (provider === "piper" && !piperStates.get(voice)?.installed) {
-      ui.modelStatus.textContent = "Descarga el modelo Piper seleccionado antes de iniciar la lectura.";
-      updateVoiceProviderUI();
-      return false;
-    }
-    if (provider === "kokoro" && !["idle", "cached"].includes(state)) return false;
-    const initialized = provider === "piper" ? await initializePiperVoice(voice) : await initializeModel();
-    if (!initialized || player.session?.id !== queue.id
-        || !playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) return false;
+  const snapshot = player.snapshot();
+  const hasPreparedAudio = Boolean(snapshot.hasDownloadableAudio || snapshot.currentAudioKey
+    || queue.audioKeys?.[snapshot.selectedIndex]);
+  if (!hasPreparedAudio) {
+    ui.playbackStatus.textContent = "Carga el contenido al reproductor para generar el audio antes de reproducirlo.";
+    return false;
   }
   if (!playbackQueueMatchesEditor(player.session, { text: ui.text.value, voice: ui.voice.value })) return false;
   await player.play();
@@ -1254,13 +1310,19 @@ async function installPiperModel(voiceId = ui.voice.value) {
   }
   const task = player.installPiperModel(voiceId, operationId).then((result) => {
     setPiperVoiceState(voiceId, { state: "cached", phase: "download", installed: true, error: "", errorCode: "", operationId });
+    const waitingForQueue = pendingAudioPreparation?.sessionId === player.session?.id
+      && pendingAudioPreparation.voice === voiceId;
     if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
-      ui.modelStatus.textContent = `Modelo Piper descargado y verificado · ${voice.label}. Pulsa «Probar voz» para inicializarlo y escuchar una muestra, o «Preparar voz Piper» para dejarlo listo.`;
+      ui.modelStatus.textContent = waitingForQueue
+        ? `Modelo Piper descargado y verificado · ${voice.label}. Preparando el audio de la cola.`
+        : `Modelo Piper descargado y verificado · ${voice.label}. Pulsa «Probar voz» o «Preparar voz Piper» para inicializarlo.`;
       ui.downloadProgress.hidden = true;
       updateVoiceProviderUI();
       renderPlayer(player.snapshot());
     }
-    return Boolean(result?.installed);
+    const installed = Boolean(result?.installed);
+    if (installed && waitingForQueue) void prepareQueuedAudio(player.session.id, voiceId);
+    return installed;
   }).catch((error) => {
     setPiperVoiceState(voiceId, { state: "error", phase: error.phase || "download", installed: Boolean(previous.installed), error: error.message || String(error), errorCode: error.code || "PIPER_DOWNLOAD_FAILED", operationId });
     if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
@@ -1298,7 +1360,7 @@ async function initializePiperVoice(voiceId = ui.voice.value) {
     await player.initialize(voiceId, operationId);
     setPiperVoiceState(voiceId, { state: "ready", phase: "initialize", installed: true, error: "", errorCode: "", operationId });
     if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
-      ui.modelStatus.textContent = `Voz lista · ${voice.label}. El audio WAV se generará al reproducir.`;
+      ui.modelStatus.textContent = `Voz lista · ${voice.label}. El audio de la cola se prepara al cargarla; pulsa Play para escucharlo.`;
       ui.downloadProgress.hidden = true;
       updateVoiceProviderUI();
       renderPlayer(player.snapshot());
@@ -2045,6 +2107,7 @@ ui.speed.addEventListener("change", () => {
   queuePersistence(false);
 });
 ui.voice.addEventListener("change", () => {
+  if (pendingAudioPreparation && pendingAudioPreparation.voice !== ui.voice.value) pendingAudioPreparation = null;
   void chrome.storage.local.set({ lastVoice: ui.voice.value });
   updateTextInfo();
   updateVoiceProviderUI();

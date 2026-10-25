@@ -66,6 +66,23 @@ test("loading a queue sends replace without sending a play command", async () =>
   client.dispose();
 });
 
+test("preparing a loaded queue sends a dedicated non-play command", async () => {
+  const runtime = fakeRuntime(async ({ command, payload }) => command === "prepare-audio" ? {
+    ok: true, sessionId: payload.sessionId,
+    snapshot: { chunks: ["Read."], status: "generating", selectedIndex: 0, speed: 1, durations: [null], generationProgress: null }
+  } : { ok: true });
+  const client = new ReaderClient({ runtime });
+  await client.replace({ id: "session-prepare", sourceText: "Read.", chunks: ["Read."], queuePrepared: true, voice: "af_heart" });
+  await client.prepareAudio();
+
+  assert.deepEqual(runtime.messages.map(({ command, payload }) => [command, payload.sessionId || null]), [
+    ["replace", null],
+    ["prepare-audio", "session-prepare"]
+  ]);
+  assert.equal(client.snapshot().status, "generating");
+  client.dispose();
+});
+
 test("voice preparation state requests are read-only background queries", async () => {
   const runtime = fakeRuntime(async ({ command, payload }) => command === "voice-preparation-status"
     ? { ok: true, voiceId: payload.voiceId, provider: "kokoro", state: "ready" }

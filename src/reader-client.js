@@ -109,6 +109,10 @@ export class ReaderClient {
     return this.request("replace", { session });
   }
 
+  prepareAudio(sessionId = this.session?.id) {
+    return this.request("prepare-audio", { sessionId });
+  }
+
   async play() {
     if (this.state.activeKind === "preview") {
       if (this.state.status === "completed") return this.preview(this.state.activeVoiceId || this.session?.voice || "af_heart");

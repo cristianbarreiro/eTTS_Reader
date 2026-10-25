@@ -30,7 +30,7 @@ export class PersistentReaderEngine {
     this.modelOperationSequence = 0;
     this.player = new PlaybackController({
       audio,
-      synthesize: (text, { voice }) => this._queueAudio(text, voice, this.player.snapshot().selectedIndex),
+      synthesize: (text, { voice, onProgress }) => this._queueAudio(text, voice, this.player.snapshot().selectedIndex, onProgress),
       getVoice: () => this.activeSession?.voice || "af_heart",
       onState: (snapshot) => this._publishState(snapshot)
     });
@@ -106,7 +106,7 @@ export class PersistentReaderEngine {
     const key = `${snapshot.status}:${snapshot.selectedIndex}:${snapshot.playingIndex}`;
     const stateChanged = key !== this.lastPublished;
     this.lastPublished = key;
-    if (!force && !stateChanged && snapshot.status === "playing" && now - this.lastProgressWrite < this.progressWriteInterval) return;
+    if (!force && !stateChanged && now - this.lastProgressWrite < this.progressWriteInterval) return;
     this.lastProgressWrite = now;
     const chunkStates = snapshot.chunks.map((_, index) => {
       if (this.activeSession.audioKeys?.[index]) return "ready";
@@ -136,7 +136,7 @@ export class PersistentReaderEngine {
   }
 
   _publishState(snapshot) {
-    this._persist(snapshot, snapshot.status !== "playing");
+    this._persist(snapshot);
     const activeAudioKey = this.activeSession?.audioKeys?.[snapshot.selectedIndex];
     const duration = snapshot.durations?.[snapshot.selectedIndex];
     if (activeAudioKey && Number.isFinite(duration) && duration > 0) {
@@ -162,7 +162,7 @@ export class PersistentReaderEngine {
     }
   }
 
-  async _queueAudio(text, voice, index) {
+  async _queueAudio(text, voice, index, onProgress = () => {}) {
     if (this.audioCacheMaintenance) {
       throw storageOperationBusyError("Se están eliminando los audios guardados. Espera a que termine y vuelve a intentarlo.");
     }
@@ -202,7 +202,10 @@ export class PersistentReaderEngine {
         message: provider === "piper" ? `Preparando Piper local para ${voiceRecord.label}.` : "Preparando Kokoro local en segundo plano."
       });
       const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
-        onProgress: (event) => this._publish("reader:model-progress", { provider, voiceId: voice, operationId, event })
+        onProgress: (event) => {
+          try { onProgress(event); } catch { /* Player progress is observational and cannot interrupt synthesis. */ }
+          this._publish("reader:model-progress", { provider, voiceId: voice, operationId, event });
+        }
       }));
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
       await validateWavBlob(blob);
@@ -405,6 +408,20 @@ export class PersistentReaderEngine {
         const started = await this.player.play();
         await this.saveTail;
         return this._response(started);
+      }
+      case "prepare-audio": {
+        if (this.audioCacheMaintenance) throw storageOperationBusyError("Se están eliminando los audios guardados. Espera a que termine y vuelve a intentarlo.");
+        if (!this.activeSession?.id || this.activeSession.id !== message.sessionId
+            || !this.activeSession.queuePrepared || !this.activeSession.chunks?.length) {
+          throw new Error("La sesión activa no coincide con la cola que quieres preparar.");
+        }
+        const snapshot = this.player.snapshot();
+        if (["playing", "starting"].includes(snapshot.status)) return this._response();
+        if (snapshot.status === "audio-ready" && snapshot.activeKind === "chunk") return this._response();
+        // Start synthesis in the offscreen owner and return immediately. Player state
+        // messages carry progress back to the panel; this command never autoplays.
+        void this.player.prepare();
+        return this._response();
       }
       case "replace": {
         const session = message.session;

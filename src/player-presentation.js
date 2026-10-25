@@ -27,6 +27,13 @@ export function readingDurationSummary(snapshot, activeProvider = snapshot.activ
 }
 
 export function readingProgressCaption(snapshot) {
+  if (snapshot.status === "generating") {
+    if (Number.isFinite(snapshot.generationProgress)) {
+      const phase = snapshot.generationPhase === "initialize" ? "Preparando voz" : "Generando audio";
+      return `${phase} · ${Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100)}%`;
+    }
+    return snapshot.generationPhase === "initialize" ? "Preparando voz local…" : "Generando audio local…";
+  }
   if (!snapshot.chunks?.length && snapshot.activeKind !== "preview") return "Sin progreso";
   if (snapshot.activeKind === "preview") return "Muestra independiente";
 

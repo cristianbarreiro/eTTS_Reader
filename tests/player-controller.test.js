@@ -151,6 +151,31 @@ test("a multi-fragment reading generates and plays fragments sequentially withou
   assert.equal(player.snapshot().totalDuration, 24);
 });
 
+test("preparing the queue generates its first WAV without autoplay and Play reuses it", async () => {
+  const updates = [];
+  const { audio, player, synthCalls } = makePlayer({
+    onState: (snapshot) => updates.push(snapshot),
+    synthesize: async (text, { onProgress }) => {
+      synthCalls.push({ text });
+      onProgress({ phase: "synthesis", loaded: 1, total: 2, progress: 50 });
+      await delay();
+      return makeWavBlob();
+    }
+  });
+  player.setChunks(["Prepare this first.", "Then continue."]);
+
+  assert.equal(await player.prepare(), true);
+  assert.equal(player.snapshot().status, "audio-ready");
+  assert.equal(player.snapshot().hasDownloadableAudio, true);
+  assert.equal(audio.playCount, 0, "preparation must not autoplay");
+  assert.deepEqual(synthCalls.map(({ text }) => text), ["Prepare this first."]);
+  assert.ok(updates.some((snapshot) => snapshot.status === "generating" && snapshot.generationProgress === 0.5));
+
+  assert.equal(await player.play(), true);
+  assert.equal(audio.playCount, 1);
+  assert.deepEqual(synthCalls.map(({ text }) => text), ["Prepare this first."], "Play reuses the prepared WAV");
+});
+
 test("pause and resume preserve the current position and reuse the WAV", async () => {
   const { audio, player, synthCalls } = makePlayer();
   player.setChunks(["Resume this clip."]);

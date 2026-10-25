@@ -45,12 +45,12 @@ flowchart TD
 
 ## 2. Flujo de lectura
 
-1. El usuario introduce/importa texto y prepara explícitamente la cola con **Cargar al reproductor**; esta acción prepara la cola pero no debe iniciar audio por sí sola.
+1. El usuario introduce/importa texto y pulsa **Cargar al reproductor**. La cola empieza a generar el primer WAV local y el Reproductor muestra la fase o el progreso disponible; esta acción nunca inicia la reproducción. Si falta un modelo Piper, la instalación sigue requiriendo la acción explícita de descarga y la preparación de la cola continúa al terminar.
 2. `ReaderClient` comunica los comandos al background, que enruta al documento offscreen.
 3. `PersistentReaderEngine` mantiene sesión, fragmentos, progreso y política de caché.
 4. `TTSProviderRouter` identifica el proveedor según el ID persistido y llama a Kokoro o Piper.
 5. El worker del proveedor genera un `Blob` WAV. El motor valida el WAV, guarda el caché cuando procede y entrega el audio al reproductor.
-6. `PlaybackController` reproduce el WAV mediante el elemento `audio` del offscreen. Esto hace que los controles de tiempo, duración, pausa, búsqueda y descarga compartan el mismo flujo para ambos proveedores.
+6. El botón **Play** inicia o reanuda el WAV preparado. `PlaybackController` lo reproduce mediante el elemento `audio` del offscreen. Esto hace que los controles de tiempo, duración, pausa, búsqueda y descarga compartan el mismo flujo para ambos proveedores.
 7. Durante la reproducción de un fragmento, el motor puede precargar como máximo el siguiente. Un cambio de sesión debe impedir que resultados tardíos se guarden en la sesión equivocada.
 
 El flujo normal de voces no debe utilizar `SpeechSynthesis`: las voces españolas son Piper y las voces inglesas existentes son Kokoro.
