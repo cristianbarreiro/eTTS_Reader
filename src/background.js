@@ -9,6 +9,9 @@ const ACTIVE_TAB_CONTEXT_KEY = "activeTabContext";
 const FOLLOW_ACTIVE_TAB_KEY = "followActiveTab";
 const PENDING_SELECTION_KEY = "pendingTabSelection";
 const SELECTION_MENU_ID = "send-selection-to-local-reader";
+const OFFSCREEN_READY_COMMAND = "__offscreen-ready__";
+const OFFSCREEN_READY_TIMEOUT_MS = 8_000;
+const OFFSCREEN_READY_POLL_MS = 100;
 let creatingOffscreen = null;
 let creatingContextMenu = null;
 let inMemoryImportTarget = null;
@@ -42,22 +45,50 @@ async function ensureOffscreenDocument() {
   await creatingOffscreen;
 }
 
-async function sendOffscreen(command, payload = {}, { create = true } = {}) {
-  if (create) await ensureOffscreenDocument();
-  else if (!(await hasOffscreenDocument())) return { ok: true, sessionId: null, snapshot: null };
-  let response;
-  let lastError;
-  for (let attempt = 0; attempt < 4; attempt++) {
+async function waitForOffscreenReady() {
+  const deadline = Date.now() + OFFSCREEN_READY_TIMEOUT_MS;
+  let lastError = null;
+  while (Date.now() < deadline) {
     try {
-      response = await chrome.runtime.sendMessage({ target: "offscreen", command, ...payload });
-      if (response) return response;
-      lastError = new Error("El motor de lectura todavía no respondió.");
+      const response = await chrome.runtime.sendMessage({ target: "offscreen", command: OFFSCREEN_READY_COMMAND });
+      if (response?.offscreenReady === true) return;
+      if (response) lastError = new Error("El documento de audio respondió con un estado inesperado.");
     } catch (error) {
       lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 80 * (attempt + 1)));
+    await new Promise((resolve) => setTimeout(resolve, OFFSCREEN_READY_POLL_MS));
   }
-  throw lastError || new Error("No se pudo contactar al motor de lectura local.");
+  const error = new Error(`El documento de audio no confirmó que estuviera listo en ${OFFSCREEN_READY_TIMEOUT_MS / 1000} segundos.`);
+  error.name = "OffscreenStartupError";
+  error.code = "OFFSCREEN_NOT_READY";
+  error.phase = "offscreen-startup";
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+async function sendOffscreen(command, payload = {}, { create = true } = {}) {
+  if (create) await ensureOffscreenDocument();
+  else if (!(await hasOffscreenDocument())) return { ok: true, sessionId: null, snapshot: null };
+  await waitForOffscreenReady();
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({ ...payload, target: "offscreen", command });
+  } catch (cause) {
+    const error = new Error(`No se pudo entregar el comando «${command}» al motor de lectura local.`);
+    error.name = "OffscreenMessageError";
+    error.code = "OFFSCREEN_MESSAGE_FAILED";
+    error.phase = "offscreen-message";
+    error.cause = cause;
+    throw error;
+  }
+  if (response == null) {
+    const error = new Error(`El documento de audio confirmó que estaba listo, pero no respondió al comando «${command}».`);
+    error.name = "OffscreenMessageError";
+    error.code = "OFFSCREEN_NO_RESPONSE";
+    error.phase = "offscreen-message";
+    throw error;
+  }
+  return response;
 }
 
 function captureTab(tab) {

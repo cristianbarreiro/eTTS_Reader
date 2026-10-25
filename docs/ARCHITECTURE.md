@@ -101,6 +101,7 @@ Las sesiones que usan IDs antiguos `system:` se migran al proveedor local defini
 ## 5. Mensajería y ciclo de vida de Edge
 
 - El background es el punto de entrada para eventos y mensajes de la extensión.
+- Antes de enviar comandos, el background espera una respuesta explícita de disponibilidad del documento offscreen. Cada operación se envía una sola vez; el sondeo de disponibilidad no repite descargas ni otras acciones con efectos.
 - El documento offscreen es una instancia administrada por el navegador; puede cerrarse al quedar inactivo. No añadas bucles o temporizadores para mantenerlo vivo artificialmente.
 - Los comandos deben responder mediante el canal establecido y propagar errores serializables.
 - Los mensajes hacia el panel pueden no tener receptor mientras está cerrado; ese caso no debe interrumpir la reproducción.

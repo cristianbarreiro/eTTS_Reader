@@ -16,6 +16,10 @@ const engine = new PersistentReaderEngine({
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== "offscreen") return undefined;
+  if (message.command === "__offscreen-ready__") {
+    sendResponse({ ok: true, offscreenReady: true });
+    return false;
+  }
   void engine.handleCommand(message).then(sendResponse).catch((error) => sendResponse({
     ok: false,
     error: error?.message || "Falló el motor de lectura local.",

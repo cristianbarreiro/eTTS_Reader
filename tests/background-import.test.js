@@ -13,18 +13,28 @@ async function loadBackground({
   initialTab = { id: 7, windowId: 2, url: "https://example.test/article", title: "Article" },
   scriptResult = { title: "Article", contentType: "text/html", type: "article", text: "Local page text", truncated: false },
   scriptResponse = null, fileAccessAllowed = false, tabsPermissionGranted = false,
-  hostPermissions = [], permissionDecision = true, offscreenExists = true
+  hostPermissions = [], permissionDecision = true, offscreenExists = true,
+  offscreenReadyAfter = 1, offscreenCommandResponse = null
 } = {}) {
   const values = new Map();
   const localValues = new Map();
   const grantedHosts = new Set(hostPermissions);
-  const calls = { panel: [], scripts: [], contextMenu: [], messages: [], permissionRequests: [], offscreenCreates: [] };
+  const calls = { panel: [], scripts: [], contextMenu: [], messages: [], permissionRequests: [], offscreenCreates: [], offscreenPings: 0, offscreenCommands: [] };
   const api = {
     runtime: {
       getManifest: () => ({ side_panel: { default_path: "sidepanel.html" } }),
       getURL: (path) => `chrome-extension://test/${path}`,
       onInstalled: event(), onMessage: event(),
-      async sendMessage(message) { calls.messages.push(message); return { ok: true }; }
+      async sendMessage(message) {
+        calls.messages.push(message);
+        if (message.target !== "offscreen") return { ok: true };
+        if (message.command === "__offscreen-ready__") {
+          calls.offscreenPings++;
+          return calls.offscreenPings >= offscreenReadyAfter ? { ok: true, offscreenReady: true } : undefined;
+        }
+        calls.offscreenCommands.push(message.command);
+        return offscreenCommandResponse ? offscreenCommandResponse(message) : { ok: true };
+      }
     },
     extension: { async isAllowedFileSchemeAccess() { return fileAccessAllowed; } },
     storage: {
@@ -96,6 +106,34 @@ test("queue preparation and recovery create the persistent offscreen engine when
     harness.api.offscreen.closeDocument();
     await harness.send({ target: "background", command: "restore", payload: { session } });
     assert.equal(harness.calls.offscreenCreates.length, 2);
+  } finally { harness.restore(); }
+});
+
+test("background waits for the offscreen listener and dispatches a Piper download only once", async () => {
+  const harness = await loadBackground({ offscreenExists: false, offscreenReadyAfter: 3 });
+  try {
+    const response = await harness.send({
+      target: "background", command: "install-piper-model",
+      payload: { voiceId: "piper:es_AR-daniela-high", operationId: "install-1" }
+    });
+    assert.equal(response.ok, true);
+    assert.equal(harness.calls.offscreenCreates.length, 1);
+    assert.equal(harness.calls.offscreenPings, 3);
+    assert.deepEqual(harness.calls.offscreenCommands, ["install-piper-model"]);
+  } finally { harness.restore(); }
+});
+
+test("a missing offscreen operation response is reported without repeating the command", async () => {
+  const harness = await loadBackground({ offscreenCommandResponse: () => undefined });
+  try {
+    const response = await harness.send({
+      target: "background", command: "install-piper-model",
+      payload: { voiceId: "piper:es_AR-daniela-high", operationId: "install-2" }
+    });
+    assert.equal(response.ok, false);
+    assert.equal(response.code, "OFFSCREEN_NO_RESPONSE");
+    assert.equal(response.phase, "offscreen-message");
+    assert.deepEqual(harness.calls.offscreenCommands, ["install-piper-model"]);
   } finally { harness.restore(); }
 });
 
