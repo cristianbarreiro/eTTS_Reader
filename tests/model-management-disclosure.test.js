@@ -164,7 +164,7 @@ test("changing provider state only opens management and never controls the reade
 });
 
 test("Piper and Kokoro status checks have a bounded wait", async () => {
-  assert.equal(MODEL_STATUS_CHECK_TIMEOUT_MS, 10_000);
+  assert.equal(MODEL_STATUS_CHECK_TIMEOUT_MS, 16_000);
   assert.equal(await withBoundedWait(Promise.resolve("ready"), 20, "timeout"), "ready");
   await assert.rejects(withBoundedWait(new Promise(() => {}), 5, "status timeout"), /status timeout/);
 });

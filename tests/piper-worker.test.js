@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { attachPiperWorker } from "../src/piper-tts-worker.js";
-import { resolvePiperAssetPaths } from "../src/piper-worker-client.js";
+import { PiperWorkerClient, resolvePiperAssetPaths } from "../src/piper-worker-client.js";
 
 test("Piper runtime and phonemizer assets resolve relative to either extension root layout", () => {
   assert.deepEqual(resolvePiperAssetPaths("chrome-extension://abc/dist/assets/offscreen.js"), {
@@ -71,8 +71,97 @@ test("Piper worker reports initialization and unknown-command errors through its
   };
   const harness = makeWorkerHarness(provider);
   await harness.send({ id: 41, type: "initialize", voiceId: "piper:test", wasmPaths: {} });
-  assert.deepEqual(harness.messages.at(-1), { id: 41, type: "error", message: "Falta el modelo instalado." });
+  assert.deepEqual(harness.messages.at(-1), { id: 41, type: "error", code: "PIPER_WORKER_OPERATION_FAILED", phase: null, message: "Falta el modelo instalado." });
   await harness.send({ id: 42, type: "unknown" });
-  assert.deepEqual(harness.messages.at(-1), { id: 42, type: "error", message: "Comando Piper desconocido: unknown" });
+  assert.deepEqual(harness.messages.at(-1), { id: 42, type: "error", code: "PIPER_WORKER_OPERATION_FAILED", phase: null, message: "Comando Piper desconocido: unknown" });
   harness.detach();
+});
+
+test("a timed-out initialization terminates its worker and the operation queue can create a fresh worker", async () => {
+  const voiceId = "piper:es_AR-daniela-high";
+  const workers = [];
+  const client = new PiperWorkerClient({
+    timeouts: { initializeMs: 12, statusMs: 30 },
+    workerFactory: () => {
+      const worker = {
+        postMessage(message) {
+          if (message.type === "initialize" && workers.length === 1) queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "progress", event: { phase: "initialize", stage: "reading-model", indeterminate: true } } }));
+          if (workers.length > 1 && message.type === "status") queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: { voiceId, installed: true } } }));
+        },
+        terminate() { this.terminated = true; }
+      };
+      workers.push(worker);
+      return worker;
+    }
+  });
+
+  await assert.rejects(client.initialize(voiceId), (error) => error.code === "PIPER_INITIALIZATION_TIMEOUT" && error.phase === "reading-model");
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(client.initializedVoice, null);
+  assert.equal(client.pending.size, 0);
+
+  const status = await client.modelStatus(voiceId);
+  assert.deepEqual(status, { voiceId, installed: true });
+  assert.equal(workers.length, 2, "the next operation creates a replacement worker");
+  assert.equal(client.pending.size, 0);
+  client.dispose();
+});
+
+test("reset rejects every pending request, clears timers, and ignores late messages from the old worker", async () => {
+  const timers = new Map();
+  let sequence = 0;
+  let oldWorker;
+  const client = new PiperWorkerClient({
+    setTimer(callback, delay) { const id = ++sequence; timers.set(id, { callback, delay }); return id; },
+    clearTimer(id) { timers.delete(id); },
+    workerFactory: () => (oldWorker = {
+      postMessage() {},
+      terminate() { this.terminated = true; }
+    })
+  });
+
+  const first = client._request("initialize", { voiceId: "piper:test" });
+  const second = client._request("status", { voiceId: "piper:test" });
+  const oldMessageHandler = oldWorker.onmessage;
+  const outcomes = [first, second].map((request) => request.then(() => null, (error) => error));
+  client.reset();
+  const errors = await Promise.all(outcomes);
+
+  assert.equal(oldWorker.terminated, true);
+  assert.equal(client.pending.size, 0);
+  assert.equal(timers.size, 0);
+  assert.ok(errors.every((error) => error.code === "PIPER_WORKER_RESET"));
+  oldMessageHandler({ data: { id: 1, type: "result", value: { ready: true } } });
+  assert.equal(client.initializedVoice, null);
+  assert.equal(client.worker, null);
+});
+
+test("download progress renews inactivity timeout while a silent worker is terminated", async () => {
+  let workersCreated = 0;
+  const progressing = new PiperWorkerClient({
+    timeouts: { downloadIdleMs: 80, downloadMaxMs: 200 },
+    workerFactory: () => {
+      workersCreated++;
+      return {
+        postMessage(message) {
+          setTimeout(() => this.onmessage({ data: { id: message.id, type: "progress", event: { loaded: 1, total: 2 } } }), 10);
+          setTimeout(() => this.onmessage({ data: { id: message.id, type: "progress", event: { loaded: 2, total: 2 } } }), 30);
+          setTimeout(() => this.onmessage({ data: { id: message.id, type: "result", value: { installed: true } } }), 50);
+        }, terminate() {}
+      };
+    }
+  });
+  assert.deepEqual(await progressing.installModel("piper:test"), { installed: true });
+  progressing.dispose();
+
+  let stalledWorker;
+  const stalled = new PiperWorkerClient({
+    timeouts: { downloadIdleMs: 10, downloadMaxMs: 100 },
+    workerFactory: () => (stalledWorker = { postMessage() {}, terminate() { this.terminated = true; } })
+  });
+  await assert.rejects(stalled.installModel("piper:test"), (error) => error.code === "PIPER_DOWNLOAD_TIMEOUT");
+  assert.equal(stalledWorker.terminated, true);
+  assert.equal(stalled.pending.size, 0);
+  assert.equal(workersCreated, 1);
 });

@@ -54,8 +54,10 @@ test("Piper initializes only from installed model data and uses the packaged WAS
   const provider = new PiperTTSProvider({
     ortModule: onnx,
     modelStore: {
-      async readInstalled(voiceId) {
+      async readInstalled(voiceId, onProgress) {
         assert.equal(voiceId, voice.id);
+        onProgress({ phase: "initialize", stage: "checking-model", voiceId });
+        onProgress({ phase: "initialize", stage: "reading-model", voiceId });
         return { voice, config, model: new Blob([Uint8Array.of(1, 2, 3)]) };
       },
       async status() { return { installed: true }; },
@@ -84,8 +86,10 @@ test("Piper initializes only from installed model data and uses the packaged WAS
     phonemizeData: "chrome-extension://test/piper/piper_phonemize.data"
   };
 
-  const initialized = await provider.initialize(voice.id, paths);
+  const phases = [];
+  const initialized = await provider.initialize(voice.id, paths, (event) => phases.push(event));
   assert.equal(initialized.provider, "piper");
+  assert.deepEqual(phases.map((event) => event.stage), ["checking-model", "reading-model", "initializing-onnx", "creating-session", "ready"]);
   assert.equal(onnx.env.wasm.wasmPaths, paths.onnxWasm);
   assert.equal(onnx.env.wasm.numThreads, 1);
   assert.equal(onnx.env.wasm.proxy, false);
@@ -124,4 +128,36 @@ test("Piper initialization reports a missing local model and can retry after it 
   installed = true;
   assert.equal((await provider.initialize(voice.id, paths)).ready, true);
   await provider.dispose();
+});
+
+test("ONNX initialization errors are classified, release partial resources, and keep the installed model", async () => {
+  let released = 0;
+  const installedModel = { voice, config, model: new Blob(["onnx"]) };
+  const provider = new PiperTTSProvider({
+    ortModule: {
+      env: { wasm: {} }, Tensor: class Tensor {},
+      InferenceSession: { async create() { throw new Error("ONNX session failed"); } }
+    },
+    modelStore: {
+      async readInstalled() { return installedModel; },
+      async status() { return { installed: true }; },
+      async remove() { return { installed: false }; }
+    },
+    phonemizerFactory: async () => ({ callMain() {} })
+  });
+  const session = { async release() { released++; } };
+  // A session can be created by a backend before a later setup stage fails;
+  // dispose must release it and clear every provider reference.
+  provider.session = session;
+  const events = [];
+  await assert.rejects(provider.initialize(voice.id, {
+    onnxWasm: "extension://ort/", phonemizeWasm: "extension://piper.wasm", phonemizeData: "extension://piper.data"
+  }, (event) => events.push(event)), (error) => error.code === "PIPER_ONNX_INITIALIZATION_FAILED" && error.phase === "creating-session");
+  assert.equal(released, 1);
+  assert.equal(provider.session, null);
+  assert.equal(provider.ort, null);
+  assert.equal(provider.config, null);
+  assert.equal(provider.voiceId, null);
+  assert.equal((await provider.modelStore.status(voice.id)).installed, true, "initialization failure never removes the verified model");
+  assert.ok(events.some((event) => event.stage === "creating-session"));
 });

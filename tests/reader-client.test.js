@@ -79,6 +79,27 @@ test("voice preparation state requests are read-only background queries", async 
   client.dispose();
 });
 
+test("Piper operation identifiers reach the offscreen coordinator and coded errors survive the message bridge", async () => {
+  const runtime = fakeRuntime(async ({ command }) => command === "initialize"
+    ? { ok: false, error: "La inicialización de Piper superó el tiempo máximo.", code: "PIPER_INITIALIZATION_TIMEOUT", phase: "initialize" }
+    : { ok: true, reset: true });
+  const client = new ReaderClient({ runtime });
+
+  await assert.rejects(client.initialize("piper:es_AR-daniela-high", "panel-42"), (error) => {
+    assert.equal(error.code, "PIPER_INITIALIZATION_TIMEOUT");
+    assert.equal(error.phase, "initialize");
+    return true;
+  });
+  await client.installPiperModel("piper:es_AR-daniela-high", "panel-43");
+  await client.resetPiperEngine("piper:es_AR-daniela-high");
+  assert.deepEqual(runtime.messages.map(({ command, payload }) => [command, payload.operationId || null]), [
+    ["initialize", "panel-42"],
+    ["install-piper-model", "panel-43"],
+    ["reset-piper-engine", null]
+  ]);
+  client.dispose();
+});
+
 test("paused preview playback resumes without creating or replacing a reading session", async () => {
   const runtime = fakeRuntime(async ({ command }) => command === "preview" ? {
     ok: true,

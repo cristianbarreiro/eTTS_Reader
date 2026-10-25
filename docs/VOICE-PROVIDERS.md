@@ -34,6 +34,12 @@ La extensión ya no consulta ni llama `SpeechSynthesis`. Al abrir una sesión an
 - Las licencias declaradas para el runtime, los datos de voz y el archivo generado no determinan la licencia global de este repositorio. El proyecto no contiene un archivo `LICENSE`.
 - El inventario ampliado y las referencias upstream están en [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
+### Recuperación y límites de espera
+
+`PiperWorkerClient` controla los límites desde fuera del worker: 15 s para consultas, 180 s para inicializar, hasta 15 min para síntesis según el texto y 10 min para descargar. Síntesis y descarga también tienen límites de inactividad (90 s y 45 s); el progreso válido renueva ese límite, pero no el absoluto. Si un worker queda bloqueado, el cliente lo termina, rechaza sus peticiones y libera la cola para que el siguiente intento cree uno nuevo.
+
+Las descargas de configuración tienen un límite de 60 s total / 20 s sin actividad. OPFS guarda las descargas en archivos temporales y registra una voz solo después de verificar el tamaño, el hash y la configuración. En el siguiente estado/instalación se retiran temporales; los archivos finales huérfanos solo se eliminan si el manifiesto local es válido. Un error de inicialización conserva el modelo verificado. «Restablecer motor Piper» libera el worker sin borrar el modelo ni datos de lectura, y no interrumpe reproducción activa.
+
 ## Verificación
 
 La compilación automatizada comprueba las versiones y copia los artefactos requeridos a `dist/ort`, `dist/ort/piper` y `dist/piper`. Las pruebas automatizadas cubren el catálogo, la migración, la caché y los errores de descarga con almacenamiento simulado. La inicialización real, la generación audible y el WAV descargado deben verificarse en Edge con la extensión compilada; una compilación correcta no prueba que la síntesis funcione.

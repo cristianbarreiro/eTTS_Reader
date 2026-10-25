@@ -26,6 +26,7 @@ export class PersistentReaderEngine {
     this.recordedDurations = new Set();
     this.previewAudioKey = null;
     this.previewVoiceId = null;
+    this.modelOperationSequence = 0;
     this.player = new PlaybackController({
       audio,
       synthesize: (text, { voice }) => this._queueAudio(text, voice, this.player.snapshot().selectedIndex),
@@ -36,6 +37,10 @@ export class PersistentReaderEngine {
 
   _publish(type, detail = {}) {
     try { this.publishMessage({ target: "panel", type, ...detail }); } catch { /* no panel is connected while audio runs */ }
+  }
+
+  _nextModelOperationId() {
+    return `engine-${++this.modelOperationSequence}`;
   }
 
   async _trackProviderOperation(provider, voiceId, operation) {
@@ -182,17 +187,22 @@ export class PersistentReaderEngine {
         this._publish("reader:error", { message: `No se pudo guardar el estado del fragmento: ${error.message}` });
       });
     }
+    let operationId = null;
     const task = this.synthesisTail.then(async () => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
       const cached = await this.repository.getAudioChunk(id);
       if (cached?.blob instanceof Blob && cached.blob.size > 0) return cached.blob;
+      operationId = this._nextModelOperationId();
       this._publish("reader:model", {
         provider,
         voiceId: voice,
         state: "loading",
+        operationId,
         message: provider === "piper" ? `Preparando Piper local para ${voiceRecord.label}.` : "Preparando Kokoro local en segundo plano."
       });
-      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice));
+      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
+        onProgress: (event) => this._publish("reader:model-progress", { provider, voiceId: voice, operationId, event })
+      }));
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
       await validateWavBlob(blob);
       await this.repository.saveAudioChunk({ id, blob, voice, provider, modelId, modelRevision: voiceRecord.modelRevision || null, providerVersion, text, format: "wav", sampleRate, duration: null });
@@ -208,10 +218,11 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, audioKeys, chunkStates, lastError: "" };
         await this.repository.saveSession(this.activeSession);
       }
-      this._publish("reader:model", {
+      if (operationId) this._publish("reader:model", {
         provider,
         voiceId: voice,
         state: "ready",
+        operationId,
         message: provider === "piper" ? `Piper local listo · ${voiceRecord.label}.` : "Kokoro local listo."
       });
       return blob;
@@ -222,10 +233,13 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, chunkStates, lastError: error.message || "No se pudo generar este fragmento." };
         this.saveTail = this.saveTail.then(() => this.repository.saveSession(this.activeSession)).catch(() => {});
       }
-      if (generation === this.sessionGeneration) this._publish("reader:model", {
+      if (generation === this.sessionGeneration && operationId) this._publish("reader:model", {
         provider,
         voiceId: voice,
         state: "error",
+        operationId,
+        phase: error.phase,
+        code: error.code,
         message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`
       });
       throw error;
@@ -290,16 +304,29 @@ export class PersistentReaderEngine {
       case "initialize": {
         const voice = message.voice || this.activeSession?.voice || "af_heart";
         const provider = getVoiceProvider(voice);
+        const operationId = message.operationId || this._nextModelOperationId();
         this._publish("reader:model", {
           provider, voiceId: voice, state: "loading",
+          operationId,
           message: provider === "piper" ? "Iniciando el motor Piper local." : "Cargando recursos locales de Kokoro."
         });
-        const result = await this._trackProviderOperation(provider, voice, () => this.inference.initialize((event) => this._publish("reader:model-progress", { provider, voiceId: voice, event }), voice));
-        this._publish("reader:model", {
-          provider, voiceId: voice, state: "ready",
-          message: provider === "piper" ? `Piper local listo · ${getVoiceRecord(voice).label}.` : "Modelo Kokoro local listo."
-        });
-        return { ok: true, result };
+        try {
+          const result = await this._trackProviderOperation(provider, voice, () => this.inference.initialize(
+            (event) => this._publish("reader:model-progress", { provider, voiceId: voice, operationId, event }), voice
+          ));
+          this._publish("reader:model", {
+            provider, voiceId: voice, state: "ready", operationId,
+            message: provider === "piper" ? `Piper local listo · ${getVoiceRecord(voice).label}.` : "Modelo Kokoro local listo."
+          });
+          return { ok: true, result };
+        } catch (error) {
+          this._publish("reader:model", {
+            provider, voiceId: voice, state: "error", operationId,
+            phase: error.phase || "initialize", code: error.code,
+            message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`
+          });
+          throw error;
+        }
       }
       case "piper-catalog": return { ok: true, voices: this.inference.piperCatalog() };
       case "piper-model-status": return { ok: true, ...(await this.inference.piperModelStatus(message.voiceId)) };
@@ -313,15 +340,26 @@ export class PersistentReaderEngine {
         const voiceId = message.voiceId;
         const voice = getVoiceRecord(voiceId);
         if (voice.provider !== "piper") throw new TypeError("Solo se pueden instalar voces Piper con esta acción.");
-        this._publish("reader:model", { provider: "piper", voiceId, state: "loading", phase: "download", message: `Descargando ${voice.label} desde el repositorio oficial.` });
+        const operationId = message.operationId || this._nextModelOperationId();
+        this._publish("reader:model", { provider: "piper", voiceId, operationId, state: "loading", phase: "download", message: `Descargando ${voice.label} desde el repositorio oficial.` });
         try {
-          const result = await this._trackProviderOperation("piper", voiceId, () => this.inference.installPiperModel(voiceId, (event) => this._publish("reader:model-progress", { provider: "piper", voiceId, event })));
-          this._publish("reader:model", { provider: "piper", voiceId, state: "cached", phase: "download", message: `Modelo Piper instalado y verificado · ${voice.label}.` });
+          const result = await this._trackProviderOperation("piper", voiceId, () => this.inference.installPiperModel(voiceId, (event) => this._publish("reader:model-progress", { provider: "piper", voiceId, operationId, event })));
+          this._publish("reader:model", { provider: "piper", voiceId, operationId, state: "cached", phase: "download", message: `Modelo Piper instalado y verificado · ${voice.label}.` });
           return { ok: true, ...result };
         } catch (error) {
-          this._publish("reader:model", { provider: "piper", voiceId, state: "error", phase: "download", message: error.message || "No se pudo instalar el modelo Piper." });
+          this._publish("reader:model", { provider: "piper", voiceId, operationId, state: "error", phase: error.phase || "download", code: error.code, message: error.message || "No se pudo instalar el modelo Piper." });
           throw error;
         }
+      }
+      case "reset-piper-engine": {
+        const voice = getVoiceRecord(message.voiceId);
+        if (voice.provider !== "piper") throw new TypeError("Solo se puede restablecer el motor Piper para una voz Piper.");
+        this._assertProviderNotInUse("piper", voice.id);
+        if (typeof this.inference.resetPiperEngine !== "function") throw new Error("El motor Piper no permite restablecer su worker.");
+        // This bypasses providerOperations and the worker's serialized queue so
+        // a stuck initialization can be terminated directly. Active playback
+        // is guarded above and cannot be interrupted by this action.
+        return { ok: true, ...this.inference.resetPiperEngine(), voiceId: voice.id };
       }
       case "delete-piper-model": {
         const voice = getVoiceRecord(message.voiceId);

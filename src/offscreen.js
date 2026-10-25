@@ -17,7 +17,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== "offscreen") return undefined;
   void engine.handleCommand(message).then(sendResponse).catch((error) => sendResponse({
     ok: false,
-    error: error?.message || "Falló el motor de lectura local."
+    error: error?.message || "Falló el motor de lectura local.",
+    code: error?.code,
+    phase: error?.phase
   }));
   return true;
 });

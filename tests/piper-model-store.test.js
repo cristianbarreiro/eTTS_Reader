@@ -61,8 +61,8 @@ const responseWithBytes = (value, chunkSize = 3) => new Response(new ReadableStr
   }
 }), { status: 200, headers: { "content-length": String(value.byteLength) } });
 
-function makeStore(fetchImpl, storage = { async getDirectory() { return new MemoryDirectoryHandle(); } }) {
-  return new PiperModelStore({ storage, fetchImpl, catalog: [voice], now: () => 123 });
+function makeStore(fetchImpl, storage = { async getDirectory() { return new MemoryDirectoryHandle(); } }, downloadTimeouts) {
+  return new PiperModelStore({ storage, fetchImpl, catalog: [voice], now: () => 123, ...(downloadTimeouts ? { downloadTimeouts } : {}) });
 }
 
 test("Piper downloads a pinned model, validates its config and SHA-256, and stores it in OPFS", async () => {
@@ -85,6 +85,9 @@ test("Piper downloads a pinned model, validates its config and SHA-256, and stor
   ]);
   assert.ok(progress.length >= 3);
   assert.equal(progress.at(-1).progress, 100);
+  assert.ok(progress.some((event) => event.stage === "downloading-config" && Number.isFinite(event.loaded)));
+  assert.ok(progress.some((event) => event.stage === "saving-config"));
+  assert.ok(progress.some((event) => event.stage === "saving-model"));
 
   const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY);
   const manifest = JSON.parse(await (await directory.getFileHandle(PIPER_MANIFEST_FILE)).getFile().then((file) => file.text()));
@@ -206,6 +209,150 @@ test("failed HTTP downloads can be retried without marking a model as installed"
   assert.equal((await store.status(voice.id)).installed, false);
   assert.equal((await store.install(voice.id)).installed, true);
   assert.equal(modelRequests, 2);
+});
+
+test("a stalled configuration download times out, preserves model state, and can be retried", async () => {
+  const root = new MemoryDirectoryHandle();
+  let stall = true;
+  const store = makeStore(async (url) => {
+    if (url.endsWith(".onnx.json") && stall) return new Response(new ReadableStream({ start() {} }), { status: 200 });
+    return url.endsWith(".onnx.json") ? new Response(JSON.stringify(config), { status: 200 }) : responseWithBytes(bytes);
+  }, { async getDirectory() { return root; } }, {
+    config: { totalMs: 200, inactivityMs: 12 },
+    model: { totalMs: 200, inactivityMs: 20 }
+  });
+
+  await assert.rejects(store.install(voice.id), (error) => error.code === "PIPER_DOWNLOAD_TIMEOUT" && error.phase === "download");
+  assert.equal((await store.status(voice.id)).installed, false);
+  stall = false;
+  assert.equal((await store.install(voice.id)).installed, true);
+});
+
+test("model download inactivity distinguishes advancing streams from a stalled stream", async () => {
+  const root = new MemoryDirectoryHandle();
+  let stall = true;
+  const store = makeStore(async (url) => {
+    if (url.endsWith(".onnx.json")) return new Response(JSON.stringify(config), { status: 200 });
+    if (stall) return new Response(new ReadableStream({ start() {} }), { status: 200, headers: { "content-length": String(bytes.byteLength) } });
+    let offset = 0;
+    let timer;
+    return new Response(new ReadableStream({
+      start(controller) {
+        const emit = () => {
+          if (offset >= bytes.byteLength) { controller.close(); return; }
+          controller.enqueue(bytes.slice(offset, ++offset));
+          timer = setTimeout(emit, 6);
+        };
+        emit();
+      },
+      cancel() { clearTimeout(timer); }
+    }), { status: 200, headers: { "content-length": String(bytes.byteLength) } });
+  }, { async getDirectory() { return root; } }, {
+    config: { totalMs: 200, inactivityMs: 30 },
+    model: { totalMs: 500, inactivityMs: 18 }
+  });
+
+  await assert.rejects(store.install(voice.id), (error) => error.code === "PIPER_DOWNLOAD_TIMEOUT" && error.timeoutKind === "inactivity");
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY);
+  assert.equal([...directory.entries.keys()].some((name) => name.endsWith(".partial")), false);
+  assert.equal((await store.status(voice.id)).installed, false);
+  stall = false;
+  assert.equal((await store.install(voice.id)).installed, true, "regular progress resets inactivity and permits a slower transfer");
+});
+
+test("OPFS recovery removes stale partial and unreferenced voice files but preserves manifest-backed models", async () => {
+  const root = new MemoryDirectoryHandle();
+  const orphanVoice = {
+    ...voice,
+    id: "piper:orphan",
+    providerVoiceId: "orphan",
+    modelPath: "es/test/voice/orphan.onnx"
+  };
+  const store = new PiperModelStore({
+    storage: { async getDirectory() { return root; } },
+    catalog: [voice, orphanVoice],
+    fetchImpl: async (url) => url.endsWith(".onnx.json") ? new Response(JSON.stringify(config), { status: 200 }) : responseWithBytes(bytes)
+  });
+  await store.install(voice.id);
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY);
+  const installedFile = `${voice.providerVoiceId}-${voice.modelRevision.slice(0, 12)}.onnx`;
+  const orphanFile = `${orphanVoice.providerVoiceId}-${orphanVoice.modelRevision.slice(0, 12)}.onnx`;
+  directory.entries.set(`${installedFile}.partial`, new Blob(["partial"]));
+  directory.entries.set(orphanFile, new Blob(["orphan"]));
+
+  assert.equal((await store.status(voice.id)).installed, true);
+  assert.equal(directory.entries.has(`${installedFile}.partial`), false);
+  assert.equal(directory.entries.has(orphanFile), false);
+  assert.equal(directory.entries.has(installedFile), true);
+});
+
+test("an invalid manifest does not authorize deleting final model files", async () => {
+  const root = new MemoryDirectoryHandle();
+  const store = makeStore(async () => new Response("unused"), { async getDirectory() { return root; } });
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY, { create: true });
+  const modelFile = `${voice.providerVoiceId}-${voice.modelRevision.slice(0, 12)}.onnx`;
+  directory.entries.set(PIPER_MANIFEST_FILE, new Blob(["not-json"]));
+  directory.entries.set(modelFile, new Blob([bytes]));
+  directory.entries.set(`${modelFile}.partial`, new Blob(["partial"]));
+
+  assert.equal((await store.status(voice.id)).reason, "manifest-invalid");
+  assert.equal(directory.entries.has(modelFile), true);
+  assert.equal(directory.entries.has(`${modelFile}.partial`), false);
+  await assert.rejects(store.install(voice.id), (error) => error.code === "PIPER_MANIFEST_INVALID");
+});
+
+test("a malformed manifest record does not authorize deleting final model files", async () => {
+  const root = new MemoryDirectoryHandle();
+  const store = makeStore(async () => new Response("unused"), { async getDirectory() { return root; } });
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY, { create: true });
+  const modelFile = `${voice.providerVoiceId}-${voice.modelRevision.slice(0, 12)}.onnx`;
+  directory.entries.set(PIPER_MANIFEST_FILE, new Blob([JSON.stringify({
+    version: 1,
+    models: {
+      [voice.id]: {
+        voiceId: "piper:other-voice",
+        modelRevision: voice.modelRevision,
+        sha256: "mismatched-hash",
+        modelFile,
+        configFile: `${modelFile}.json`,
+        modelSizeBytes: voice.modelSizeBytes,
+        configSizeBytes: 12,
+        installedAt: 123
+      }
+    }
+  })]));
+  directory.entries.set(modelFile, new Blob([bytes]));
+
+  assert.equal((await store.status(voice.id)).reason, "manifest-invalid");
+  assert.equal(directory.entries.has(modelFile), true);
+  await assert.rejects(store.remove(voice.id), (error) => error.code === "PIPER_MANIFEST_INVALID");
+});
+
+test("a well-formed manifest from an older catalog revision remains recoverable", async () => {
+  const root = new MemoryDirectoryHandle();
+  const store = makeStore(async (url) => url.endsWith(".onnx.json")
+    ? new Response(JSON.stringify(config), { status: 200 }) : responseWithBytes(bytes), { async getDirectory() { return root; } });
+  const directory = await root.getDirectoryHandle(PIPER_OPFS_DIRECTORY, { create: true });
+  const oldRevision = "abcdef0123456789abcdef0123456789abcdef01";
+  const oldModelFile = `${voice.providerVoiceId}-${oldRevision.slice(0, 12)}.onnx`;
+  const oldConfigFile = `${oldModelFile}.json`;
+  directory.entries.set(oldModelFile, new Blob([bytes]));
+  directory.entries.set(oldConfigFile, new Blob([JSON.stringify(config)]));
+  directory.entries.set(PIPER_MANIFEST_FILE, new Blob([JSON.stringify({
+    version: 1,
+    models: {
+      [voice.id]: {
+        voiceId: voice.id, modelRevision: oldRevision, sha256: "b".repeat(64),
+        modelFile: oldModelFile, configFile: oldConfigFile,
+        modelSizeBytes: bytes.byteLength, configSizeBytes: JSON.stringify(config).length, installedAt: 123
+      }
+    }
+  })]));
+
+  assert.equal((await store.status(voice.id)).installed, false);
+  assert.equal(directory.entries.has(oldModelFile), true, "the older manifest-backed files remain available until replacement commits");
+  assert.equal((await store.install(voice.id)).installed, true);
+  assert.equal(directory.entries.has(oldModelFile), false, "the previous revision is removed only after the replacement manifest is written");
 });
 
 test("invalid Piper config and unavailable OPFS fail before model initialization", async () => {

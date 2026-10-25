@@ -5,6 +5,13 @@ import { PiperModelStore } from "./piper-model-store.js";
 
 const MAX_PHONEME_CHUNK = 400;
 
+function annotatePiperError(value, code, phase) {
+  const error = value instanceof Error ? value : new Error(String(value || "Falló el motor Piper local."));
+  if (!error.code) error.code = code;
+  if (!error.phase) error.phase = phase;
+  return error;
+}
+
 export function splitPiperText(text, maxLength = MAX_PHONEME_CHUNK) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return [];
@@ -102,24 +109,29 @@ export class PiperTTSProvider {
     if (this.initialization) await this.initialization.catch(() => {});
     if (this.session) await this.dispose();
     if (!wasmPaths?.onnxWasm || !wasmPaths?.phonemizeWasm || !wasmPaths?.phonemizeData) {
-      throw new Error("Faltan las rutas locales de ONNX Runtime o del fonemizador Piper.");
+      throw annotatePiperError(new Error("Faltan las rutas locales de ONNX Runtime o del fonemizador Piper."), "PIPER_ASSET_PATHS_INVALID", "initialize");
     }
-    const task = this._initialize(voice, wasmPaths, onProgress);
+    let phase = "checking-model";
+    const reportPhase = (event) => {
+      if (event?.stage) phase = event.stage;
+      try { onProgress(event); } catch { /* Progress observers cannot invalidate ONNX initialization. */ }
+    };
+    const task = this._initialize(voice, wasmPaths, reportPhase);
     this.initialization = task;
     try { return await task; }
     catch (error) {
-      this.session = null;
-      this.ort = null;
-      this.config = null;
-      this.voiceId = null;
-      throw error;
+      try { await this.dispose(); } catch { /* The worker can still be terminated by the client on timeout. */ }
+      const code = phase === "creating-session" ? "PIPER_ONNX_INITIALIZATION_FAILED"
+        : phase === "initializing-onnx" ? "PIPER_ONNX_RUNTIME_FAILED"
+          : phase === "reading-model" ? "PIPER_MODEL_READ_FAILED" : "PIPER_INITIALIZATION_FAILED";
+      throw annotatePiperError(error, code, phase);
     } finally {
       if (this.initialization === task) this.initialization = null;
     }
   }
 
   async _initialize(voice, wasmPaths, onProgress) {
-    const installed = await this.modelStore.readInstalled(voice.id);
+    const installed = await this.modelStore.readInstalled(voice.id, onProgress);
     const module = this.ortModule.default || this.ortModule;
     const env = module.env;
     if (!env?.wasm || !module.InferenceSession || !module.Tensor) {
@@ -128,13 +140,15 @@ export class PiperTTSProvider {
     env.wasm.wasmPaths = wasmPaths.onnxWasm;
     env.wasm.numThreads = 1;
     env.wasm.proxy = false;
+    onProgress({ phase: "initialize", stage: "initializing-onnx", voiceId: voice.id, indeterminate: true });
     const modelBuffer = await installed.model.arrayBuffer();
+    onProgress({ phase: "initialize", stage: "creating-session", voiceId: voice.id, indeterminate: true });
     const session = await module.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] });
     this.session = session;
     this.ort = module;
     this.config = installed.config;
     this.voiceId = voice.id;
-    onProgress({ phase: "initialize", voiceId: voice.id, progress: 100 });
+    onProgress({ phase: "initialize", stage: "ready", voiceId: voice.id, progress: 100 });
     return { provider: "piper", voiceId: voice.id, ready: true, modelRevision: voice.modelRevision };
   }
 
@@ -143,14 +157,19 @@ export class PiperTTSProvider {
     if (!this.phonemizer || this.phonemizerPaths !== pathsKey) {
       const output = [];
       const errors = [];
-      const phonemizer = await this.phonemizerFactory({
-        print: (value) => output.push(String(value)),
-        printErr: (value) => errors.push(String(value)),
-        locateFile: (name) => name.endsWith(".wasm")
-          ? wasmPaths.phonemizeWasm
-          : name.endsWith(".data") ? wasmPaths.phonemizeData : name
-      });
-      if (phonemizer?.ready) await phonemizer.ready;
+      let phonemizer;
+      try {
+        phonemizer = await this.phonemizerFactory({
+          print: (value) => output.push(String(value)),
+          printErr: (value) => errors.push(String(value)),
+          locateFile: (name) => name.endsWith(".wasm")
+            ? wasmPaths.phonemizeWasm
+            : name.endsWith(".data") ? wasmPaths.phonemizeData : name
+        });
+        if (phonemizer?.ready) await phonemizer.ready;
+      } catch (error) {
+        throw annotatePiperError(error, "PIPER_PHONEMIZER_FAILED", "phonemize");
+      }
       this.phonemizer = phonemizer;
       this.phonemizerPaths = pathsKey;
       this.phonemizerOutput = output;
@@ -172,7 +191,7 @@ export class PiperTTSProvider {
         "/espeak-ng-data"
       ]);
     } catch (error) {
-      if (!output.length) throw new Error(`No se pudo fonemizar el texto para ${voice.label}: ${error.message || error}`);
+      if (!output.length) throw annotatePiperError(new Error(`No se pudo fonemizar el texto para ${voice.label}: ${error.message || error}`), "PIPER_PHONEMIZER_FAILED", "phonemize");
     }
     for (let index = output.length - 1; index >= 0; index--) {
       try {
@@ -180,7 +199,7 @@ export class PiperTTSProvider {
         if (Array.isArray(result.phoneme_ids) && result.phoneme_ids.length) return result.phoneme_ids;
       } catch { /* Emscripten may emit informational output before the JSON payload. */ }
     }
-    throw new Error(errors.join(" ") || `El fonemizador Piper no devolvió fonemas para ${voice.label}.`);
+    throw annotatePiperError(new Error(errors.join(" ") || `El fonemizador Piper no devolvió fonemas para ${voice.label}.`), "PIPER_PHONEMIZER_FAILED", "phonemize");
   }
 
   async _synthesizeChunk(text, wasmPaths) {
@@ -208,12 +227,16 @@ export class PiperTTSProvider {
     if (this.voiceId !== voiceId || !this.session) throw new Error("Inicializa primero la voz Piper seleccionada.");
     const chunks = splitPiperText(text);
     if (!chunks.length) throw new Error("No hay texto para sintetizar con Piper.");
-    const pcm = [];
-    for (let index = 0; index < chunks.length; index++) {
-      pcm.push(await this._synthesizeChunk(chunks[index], wasmPaths));
-      onProgress({ phase: "synthesis", voiceId, loaded: index + 1, total: chunks.length, progress: (index + 1) / chunks.length * 100 });
+    try {
+      const pcm = [];
+      for (let index = 0; index < chunks.length; index++) {
+        pcm.push(await this._synthesizeChunk(chunks[index], wasmPaths));
+        onProgress({ phase: "synthesis", voiceId, loaded: index + 1, total: chunks.length, progress: (index + 1) / chunks.length * 100 });
+      }
+      return pcmToWavBlob(joinPcm(pcm), this.config.audio.sample_rate);
+    } catch (error) {
+      throw annotatePiperError(error, "PIPER_SYNTHESIS_FAILED", "synthesis");
     }
-    return pcmToWavBlob(joinPcm(pcm), this.config.audio.sample_rate);
   }
 
   async removeModel(voiceId) {

@@ -43,6 +43,35 @@ export function describeTabContext(context) {
 
 export function userFacingErrorMessage(error, action = "general") {
   const detail = String(error?.message || error || "");
+  const piperPhase = ({
+    "checking-model": "la comprobación del modelo instalado",
+    "reading-model": "la lectura del modelo local",
+    "initializing-onnx": "la inicialización de ONNX Runtime",
+    "creating-session": "la creación de la sesión de inferencia",
+    download: "la descarga del modelo",
+    synthesis: "la generación de audio"
+  })[error?.phase];
+  if (error?.code === "PIPER_DOWNLOAD_TIMEOUT") {
+    return "La descarga de Piper dejó de avanzar o alcanzó su límite de tiempo. Los modelos verificados se conservaron; puedes reintentar.";
+  }
+  if (error?.code === "PIPER_INITIALIZATION_TIMEOUT") {
+    return `La preparación de Piper agotó el tiempo${piperPhase ? ` durante ${piperPhase}` : ""}. El worker se restableció y el modelo local se conservó; puedes reintentar.`;
+  }
+  if (error?.code === "PIPER_SYNTHESIS_TIMEOUT") {
+    return "La generación de audio Piper agotó el tiempo. El worker se restableció y puedes volver a intentar la lectura.";
+  }
+  if (error?.code === "PIPER_WORKER_RESET") {
+    return "El motor Piper se restableció. El modelo y tus documentos siguen guardados; puedes volver a preparar la voz.";
+  }
+  if (error?.code === "PIPER_HTTP_ERROR" || error?.code === "PIPER_NETWORK_ERROR") {
+    return "No se pudo descargar el recurso Piper. Comprueba la conexión e inténtalo de nuevo.";
+  }
+  if (error?.code === "PIPER_MODEL_MISSING") {
+    return "El modelo Piper no está instalado. Descárgalo desde Modelo y almacenamiento y vuelve a intentarlo.";
+  }
+  if (error?.code === "PIPER_CONFIG_INVALID" || error?.code === "PIPER_MANIFEST_INVALID") {
+    return "No se pudo validar la configuración local de Piper. Se conservaron los archivos existentes; revisa el estado del modelo e inténtalo de nuevo.";
+  }
   if (/quota|indexeddb|storage|transaction/i.test(detail)) {
     return "No se pudieron guardar los cambios locales. Comprueba el espacio disponible e inténtalo de nuevo.";
   }

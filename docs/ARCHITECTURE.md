@@ -38,8 +38,8 @@ flowchart TD
 | `src/player-controller.js` | Estado de reproducción del WAV, progreso, pausa, reanudación, búsqueda y navegación entre fragmentos | Debe consumir audio generado y mantener el contrato común de los proveedores |
 | `src/tts-router.js` | Enrutar por identificador y proveedor de voz | Debe fallar explícitamente ante IDs desconocidos; no asumir que todo ID es Kokoro |
 | `src/tts-worker-client.js`, `src/tts-worker.js`, `src/tts.js` | Worker e inferencia de Kokoro | Mantener separados sus recursos/runtime de los de Piper |
-| `src/piper-worker-client.js`, `src/piper-tts-worker.js`, `src/piper-tts.js` | Catálogo Piper, fonemización, inferencia ONNX, conversión PCM→WAV y ciclo de vida del worker | No bloquear la UI; validar voz/modelo/recursos antes de inferir |
-| `src/piper-model-store.js` | Descargar, verificar, guardar, consultar y eliminar modelos Piper | OPFS; revisar revisión, tamaño, SHA-256 y configuración del modelo |
+| `src/piper-worker-client.js`, `src/piper-tts-worker.js`, `src/piper-tts.js` | Catálogo Piper, fonemización, inferencia ONNX, conversión PCM→WAV y ciclo de vida del worker | Aplicar plazos por operación en el cliente, terminar workers bloqueados e ignorar sus mensajes tardíos; permitir reconstruirlos sin borrar modelos |
+| `src/piper-model-store.js` | Descargar, verificar, guardar, consultar, recuperar y eliminar modelos Piper | OPFS; revisar revisión, tamaño, SHA-256 y configuración; limpiar archivos parciales y huérfanos solo cuando un manifiesto válido permita determinar su propiedad |
 | `src/persistence.js` | Documentos, sesiones y caché de WAV en IndexedDB | Las migraciones deben preservar datos no relacionados con el cambio |
 | `src/confirm-action.js`, `src/library-confirmation.js`, `src/storage-safety.js` | Confirmación segura de eliminaciones, presentación y reglas de protección de almacenamiento | No reintroducir diálogos nativos en las eliminaciones ya cubiertas |
 
@@ -69,6 +69,9 @@ El flujo normal de voces no debe utilizar `SpeechSynthesis`: las voces española
 - Catálogo en `src/voice-catalog.js`; actualmente incluye Daniela (`es_AR`, calidad alta) y DaveFX (`es_ES`, calidad media).
 - `PiperWorkerClient` serializa operaciones que comparten la instancia de inferencia; `PiperTTSProvider` ejecuta fonemización e inferencia ONNX en el worker.
 - `PiperModelStore` obtiene los modelos desde revisiones fijadas del repositorio de voces, valida configuración y tamaño/hash y conserva los archivos en OPFS.
+- El cliente del worker aplica límites de tiempo para estado, inicialización, síntesis y descarga; la descarga e inferencia también expiran si dejan de enviar progreso. Un timeout termina el worker desde el contexto de control, conserva la última fase informada y libera la cola para un intento nuevo.
+- El restablecimiento del motor no elimina pesos, documentos, sesiones ni WAV y no se permite mientras Piper esté reproduciendo. La siguiente preparación crea un worker nuevo bajo demanda.
+- Durante la recuperación de OPFS se eliminan archivos `.partial`; los recursos finales sin referencia solo se eliminan si el manifiesto pudo validarse. Un manifiesto inválido protege los archivos finales existentes.
 - El modelo requerido se descarga solo cuando el usuario inicia su instalación. Un modelo guardado y un modelo inicializado son estados diferentes.
 - Los assets de ONNX Runtime y fonemización deben servirse desde la extensión compilada. Comprueba las rutas emitidas y el empaquetado de WASM con `vite.config.js`.
 

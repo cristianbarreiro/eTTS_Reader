@@ -77,7 +77,12 @@ export class ReaderClient {
 
   async request(command, payload = {}) {
     const response = await this.runtime.sendMessage({ target: "background", command, payload });
-    if (response?.ok === false) throw new Error(response.error || "Falló el motor local de lectura.");
+    if (response?.ok === false) {
+      const error = new Error(response.error || "Falló el motor local de lectura.");
+      if (response.code) error.code = response.code;
+      if (response.phase) error.phase = response.phase;
+      throw error;
+    }
     if (response?.snapshot && (!response.sessionId || response.sessionId === this.session?.id)) {
       const currentAudioKey = command === "clear-audio-cache"
         ? null
@@ -126,12 +131,13 @@ export class ReaderClient {
   }
   setVoice(value) { return this.request("voice", { value }); }
   preview(voice) { return this.request("preview", { voice }); }
-  initialize(voice = this.session?.voice || "af_heart") { return this.request("initialize", { voice }); }
+  initialize(voice = this.session?.voice || "af_heart", operationId) { return this.request("initialize", { voice, operationId }); }
   piperCatalog() { return this.request("piper-catalog"); }
   piperModelStatus(voiceId) { return this.request("piper-model-status", { voiceId }); }
   voicePreparationStatus(voiceId) { return this.request("voice-preparation-status", { voiceId }); }
   listInstalledPiperModels() { return this.request("list-installed-piper-models"); }
-  installPiperModel(voiceId) { return this.request("install-piper-model", { voiceId }); }
+  installPiperModel(voiceId, operationId) { return this.request("install-piper-model", { voiceId, operationId }); }
+  resetPiperEngine(voiceId) { return this.request("reset-piper-engine", { voiceId }); }
   deletePiperModel(voiceId) { return this.request("delete-piper-model", { voiceId }); }
   clearAudioCache() { return this.request("clear-audio-cache"); }
   deleteModel() { return this.request("delete-model"); }

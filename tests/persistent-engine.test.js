@@ -106,6 +106,51 @@ test("voice preparation status reports the selected provider without starting pl
   assert.equal(engine.player.snapshot().status, "empty");
 });
 
+test("Piper reset bypasses a pending initialization, reports its operation, and protects active playback", async () => {
+  const repository = new MemoryRepository();
+  const savedAudio = { id: "cached-wav", blob: makeWavBlob() };
+  const savedSession = { ...session(), id: "saved-session", audioKeys: [savedAudio.id] };
+  repository.audio.set(savedAudio.id, savedAudio);
+  repository.sessions.set(savedSession.id, savedSession);
+  const published = [];
+  const voiceId = PIPER_VOICE_CATALOG[0].id;
+  let rejectInitialization;
+  let resetCalls = 0;
+  const engine = new PersistentReaderEngine({
+    audio: new MockAudio(),
+    repository,
+    publish: (message) => published.push(message),
+    inference: {
+      initialize() { return new Promise((_resolve, reject) => { rejectInitialization = reject; }); },
+      async synthesize() { return makeWavBlob(); },
+      resetPiperEngine() {
+        resetCalls++;
+        const error = new Error("Worker Piper restablecido.");
+        error.code = "PIPER_WORKER_RESET";
+        error.phase = "initialize";
+        rejectInitialization(error);
+        return { reset: true, modelPreserved: true };
+      },
+      async dispose() {}
+    }
+  });
+  const initializing = engine.handleCommand({ command: "initialize", voice: voiceId, operationId: "panel-reset-test" });
+  await waitFor(() => engine.providerOperations.get("piper")?.get(voiceId) === 1);
+
+  assert.deepEqual(await engine.handleCommand({ command: "reset-piper-engine", voiceId }), {
+    ok: true, reset: true, modelPreserved: true, voiceId
+  });
+  await assert.rejects(initializing, /Worker Piper restablecido/);
+  assert.equal(resetCalls, 1);
+  assert.ok(published.some((message) => message.operationId === "panel-reset-test" && message.state === "error" && message.code === "PIPER_WORKER_RESET"));
+  assert.equal(repository.audio.get(savedAudio.id), savedAudio, "reset keeps generated audio cached");
+  assert.equal(repository.sessions.get(savedSession.id), savedSession, "reset keeps reading sessions unchanged");
+
+  engine.player.snapshot = () => ({ status: "playing", activeKind: "chunk", activeVoiceId: voiceId });
+  await assert.rejects(engine.handleCommand({ command: "reset-piper-engine", voiceId }), /STORAGE_OPERATION_BUSY/);
+  assert.equal(resetCalls, 1, "reset cannot interrupt audio that is using Piper");
+});
+
 test("offscreen engine prebuffers one next chunk and advances without a connected panel", async () => {
   const repository = new MemoryRepository();
   const synthCalls = [];
@@ -253,6 +298,25 @@ test("generation failures persist their chunk error and restore without autoplay
   assert.equal(second.engine.player.snapshot().status, "error");
   assert.equal(second.engine.player.snapshot().message, "Kokoro no pudo iniciar.");
   assert.equal(second.audio.playCount, 0);
+});
+
+test("Piper synthesis diagnostics keep their code and phase in model-state messages", async () => {
+  const repository = new MemoryRepository();
+  const published = [];
+  const voiceId = PIPER_VOICE_CATALOG[0].id;
+  const error = new Error("Piper synthesis timed out");
+  error.code = "PIPER_SYNTHESIS_TIMEOUT";
+  error.phase = "synthesis";
+  const engine = new PersistentReaderEngine({
+    audio: new MockAudio(), repository, publish: (message) => published.push(message),
+    inference: { async synthesize() { throw error; }, async initialize() { return { ready: true }; }, async dispose() {} }
+  });
+
+  await engine.handleCommand({ command: "start", session: { ...session(), sourceText: "Hola.", chunks: ["Hola."], voice: voiceId } });
+  await waitFor(() => published.some((message) => message.type === "reader:model" && message.state === "error"));
+  const failure = published.find((message) => message.type === "reader:model" && message.state === "error");
+  assert.equal(failure.code, "PIPER_SYNTHESIS_TIMEOUT");
+  assert.equal(failure.phase, "synthesis");
 });
 
 test("audio-cache deletion refuses to remove WAVs while playback is using the reader", async () => {

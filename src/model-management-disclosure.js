@@ -1,4 +1,6 @@
-export const MODEL_STATUS_CHECK_TIMEOUT_MS = 10_000;
+// Sit just beyond PiperWorkerClient's 15 second status request deadline so the
+// worker can reject and clean up the request before the panel reports failure.
+export const MODEL_STATUS_CHECK_TIMEOUT_MS = 16_000;
 
 export function getVoicePreparationState(voiceId, { getVoiceProvider, piperStates, kokoroState }) {
   const provider = getVoiceProvider(voiceId);

@@ -730,10 +730,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const needsContext = [
       "start", "preview", "initialize", "restore", "piper-catalog", "piper-model-status",
-      "list-installed-piper-models", "install-piper-model", "delete-piper-model", "clear-audio-cache", "voice-preparation-status"
+      "list-installed-piper-models", "install-piper-model", "delete-piper-model", "reset-piper-engine", "clear-audio-cache", "voice-preparation-status"
     ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };
-  void run().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "Falló la coordinación del lector." }));
+  void run().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || "Falló la coordinación del lector.", code: error?.code, phase: error?.phase }));
   return true;
 });

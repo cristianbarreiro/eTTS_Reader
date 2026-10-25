@@ -38,7 +38,8 @@ Ejecuta toda la suite con npm test. Para investigar un área, localiza los archi
 - Enrutamiento de voces Kokoro/Piper.
 - Catálogos y migración de IDs heredados.
 - Worker y errores de síntesis.
-- Descarga, validación y almacenamiento OPFS de modelos Piper.
+- Plazos del worker Piper, terminación de workers bloqueados, reintento con worker nuevo y propagación del error al panel.
+- Descarga, validación y almacenamiento OPFS de modelos Piper, incluidos timeouts de red/flujo, recuperación de temporales y preservación de modelos válidos.
 - Claves de caché y persistencia IndexedDB.
 - Colas de reproducción, pausa, reanudación, progreso y restauración de sesiones.
 - Eliminación segura de documentos, sesiones, audios y modelos.
@@ -74,6 +75,7 @@ Por cada voz Piper soportada en el catálogo:
 8. Cierra y vuelve a abrir el Side Panel. Comprueba que el modelo sigue instalado y que una sesión puede recuperarse sin autoplay inesperado.
 9. Si está disponible un entorno controlado, desconecta la red después de completar la descarga y vuelve a sintetizar texto nuevo. La prueba debe demostrar que el flujo de inferencia usa recursos locales; no basta con reproducir un WAV que estaba en caché.
 10. Si se cancela o falla una descarga, verifica que se muestre el error y que el siguiente intento pueda recuperarse sin tratar un archivo incompleto como instalado.
+11. Si la inicialización de Piper deja de avanzar, confirma que la UI abandona «Preparando Piper…», permite reintentar y conserva el modelo verificado. La acción «Restablecer motor Piper» reconstruye el worker, pero debe permanecer bloqueada durante reproducción o una muestra activa.
 
 ### Kokoro: no regresión
 

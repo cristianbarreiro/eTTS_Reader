@@ -7,6 +7,7 @@ import { persistEditorSnapshot } from "./editor-persistence.js";
 import { buildLibraryEntries, libraryActionFor, openLibraryEntry, resumeLibrarySession } from "./library.js";
 import { ReaderClient } from "./reader-client.js";
 import { getVoiceProvider, getVoiceRecord, isLegacySystemVoiceId, PIPER_DEFAULT_VOICE_ID, PIPER_VOICE_CATALOG, voiceSessionFields } from "./voice-catalog.js";
+import { isSelectedPiperVoiceMessage, shouldAcceptPiperOperationMessage } from "./piper-ui-state.js";
 import { requestSitePermissionFromClick, requestTabsPermissionFromClick } from "./tab-permissions.js";
 import { createPanelStatusState, userFacingErrorMessage } from "./ui-presentation.js";
 import { kokoroEngineLabel, playerHeaderState, readingDurationSummary, readingProgressCaption } from "./player-presentation.js";
@@ -47,7 +48,7 @@ const ui = {
   importPreview: $("#tab-import-preview"), importMeta: $("#tab-import-meta"), importText: $("#tab-import-text"),
   replaceImport: $("#replace-with-import"), appendImport: $("#append-import"), cancelImport: $("#cancel-import"),
   voice: $("#voice-select"), speed: $("#speed"), install: $("#install-model"), test: $("#test-voice"), voiceNote: $("#voice-note"), privacyNote: $("#privacy-note"),
-  engineState: $("#engine-state"), modelStatus: $("#model-status"), downloadProgress: $("#download-progress"),
+  engineState: $("#engine-state"), modelStatus: $("#model-status"), downloadProgress: $("#download-progress"), resetPiperEngine: $("#reset-piper-engine"),
   play: $("#play"), pause: $("#pause"), stop: $("#stop"), previous: $("#previous"), next: $("#next"),
   position: $("#position"), playerState: $("#player-state"), playbackStatus: $("#playback-status"),
   progress: $("#read-progress"), progressFill: $("#read-progress-fill"), progressCaption: $("#progress-caption"),
@@ -73,6 +74,8 @@ let modelState = "checking";
 let initializationPromise = null;
 const piperStates = new Map(PIPER_VOICE_CATALOG.map((voice) => [voice.id, { state: "checking", installed: false, modelSizeBytes: voice.modelSizeBytes }]));
 const piperInstallPromises = new Map();
+let piperOperationSequence = 0;
+const retiredPiperOperations = new Map();
 const modelManagementDisclosure = createModelManagementDisclosure({
   details: ui.modelManagement,
   getSelectedVoiceId: () => ui.voice.value,
@@ -259,6 +262,10 @@ function updateVoiceProviderUI() {
       ui.deletePiperModel.hidden = !state.installed;
       ui.deletePiperModel.disabled = state.state === "loading";
     }
+    if (ui.resetPiperEngine) {
+      ui.resetPiperEngine.hidden = !(state.state === "error" && state.installed && state.phase !== "download");
+      ui.resetPiperEngine.disabled = state.state === "loading";
+    }
     ui.install.disabled = ["checking", "loading", "ready"].includes(state.state);
     if (state.state === "checking") ui.install.textContent = "Comprobando modelo local…";
     else if (state.state === "loading") ui.install.textContent = state.phase === "download" ? "Descargando Piper…" : "Preparando Piper…";
@@ -269,6 +276,7 @@ function updateVoiceProviderUI() {
   }
   ui.deleteModel.hidden = false;
   if (ui.deletePiperModel) ui.deletePiperModel.hidden = true;
+  if (ui.resetPiperEngine) ui.resetPiperEngine.hidden = true;
   ui.engineState.textContent = kokoroEngineLabel(modelState);
   ui.engineState.dataset.state = modelState;
   const migratedSession = Boolean(currentSession?.voiceMigrationVersion);
@@ -412,34 +420,97 @@ function setPiperVoiceState(voiceId, patch) {
   }
 }
 
+function retirePiperOperation(voiceId, operationId) {
+  if (!operationId) return;
+  const retired = retiredPiperOperations.get(voiceId) || new Set();
+  retired.add(operationId);
+  while (retired.size > 24) retired.delete(retired.values().next().value);
+  retiredPiperOperations.set(voiceId, retired);
+}
+
+function beginPiperOperation(voiceId, patch) {
+  const previous = piperStates.get(voiceId) || {};
+  retirePiperOperation(voiceId, previous.operationId);
+  const operationId = `panel-${++piperOperationSequence}`;
+  setPiperVoiceState(voiceId, { ...patch, operationId });
+  return operationId;
+}
+
+function acceptPiperOperationMessage(message) {
+  const previous = piperStates.get(message.voiceId) || {};
+  const retired = retiredPiperOperations.get(message.voiceId) || new Set();
+  if (!shouldAcceptPiperOperationMessage(message, previous, retired)) return false;
+  if (!message.voiceId || !message.operationId || previous.operationId === message.operationId) return true;
+  retirePiperOperation(message.voiceId, previous.operationId);
+  setPiperVoiceState(message.voiceId, { operationId: message.operationId });
+  return true;
+}
+
+function piperStageLabel(event = {}) {
+  return ({
+    "downloading-config": "Descargando configuración de voz…",
+    "config-ready": "Configuración descargada; verificando la voz…",
+    "downloading-model": "Descargando modelo Piper…",
+    "saving-config": "Guardando configuración validada…",
+    "saving-model": "Guardando modelo verificado en el dispositivo…",
+    "model-ready": "Modelo Piper verificado y guardado.",
+    "checking-model": "Comprobando el modelo instalado…",
+    "reading-model": "Leyendo el modelo desde el almacenamiento local…",
+    "initializing-onnx": "Inicializando ONNX Runtime local (WASM/CPU)…",
+    "creating-session": "Creando la sesión de inferencia…",
+    ready: "Voz Piper preparada."
+  })[event.stage] || (event.phase === "synthesis" ? "Generando audio Piper local…" : "Preparando Piper…");
+}
+
 function handleModelMessage(message) {
   if (message.type === "reader:model-progress") {
     const event = message.event;
+    const isPiper = message.provider === "piper";
+    if (isPiper && message.voiceId) {
+      if (!acceptPiperOperationMessage(message)) return;
+      const previous = piperStates.get(message.voiceId) || {};
+      setPiperVoiceState(message.voiceId, {
+        state: "loading",
+        installed: previous.installed || event?.phase !== "download",
+        phase: event?.phase || "initialize",
+        stage: event?.stage || "",
+        operationId: message.operationId || previous.operationId
+      });
+      if (!isSelectedPiperVoiceMessage(message.voiceId, ui.voice.value)) return;
+      ui.downloadProgress.hidden = false;
+      if (Number.isFinite(event?.progress)) ui.downloadProgress.value = event.progress;
+      else ui.downloadProgress.removeAttribute("value");
+      ui.modelStatus.textContent = Number.isFinite(event?.progress)
+        ? `${piperStageLabel(event)} · ${Math.round(event.progress)}%`
+        : piperStageLabel(event);
+      updateVoiceProviderUI();
+      return;
+    }
     if (Number.isFinite(event?.progress)) {
-      const isPiper = message.provider === "piper";
-      if (isPiper && message.voiceId) {
-        const previous = piperStates.get(message.voiceId) || {};
-        setPiperVoiceState(message.voiceId, { state: "loading", installed: previous.installed || event.phase !== "download", phase: event.phase || "initialize" });
-      }
       ui.downloadProgress.hidden = false;
       ui.downloadProgress.value = event.progress;
-      ui.modelStatus.textContent = `${isPiper ? "Piper" : "Kokoro"} · ${event.file || event.voiceId || "modelo local"}: ${Math.round(event.progress)}%`;
+      ui.modelStatus.textContent = `Kokoro · ${event.file || event.voiceId || "modelo local"}: ${Math.round(event.progress)}%`;
       updateVoiceProviderUI();
     }
     return;
   }
   if (message.provider === "piper" && message.voiceId) {
+    if (!acceptPiperOperationMessage(message)) return;
     const previous = piperStates.get(message.voiceId) || {};
     setPiperVoiceState(message.voiceId, {
       state: message.state,
       installed: message.state === "idle" ? false : message.state === "cached" || message.state === "ready" || previous.installed,
       phase: message.phase || "initialize",
-      error: message.state === "error" ? message.message : ""
+      error: message.state === "error" ? message.message : "",
+      errorCode: message.state === "error" ? message.code || "PIPER_WORKER_OPERATION_FAILED" : "",
+      operationId: message.operationId || previous.operationId
     });
-    if (message.message) ui.modelStatus.textContent = message.message;
-    ui.downloadProgress.hidden = true;
-    updateVoiceProviderUI();
-    renderPlayer(player.snapshot());
+    if (isSelectedPiperVoiceMessage(message.voiceId, ui.voice.value)) {
+      if (message.message) ui.modelStatus.textContent = message.message;
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
     return;
   }
   if (message.state === "loading") {
@@ -1170,25 +1241,31 @@ async function installPiperModel(voiceId = ui.voice.value) {
   const voice = getVoiceRecord(voiceId);
   if (voice.provider !== "piper") return false;
   const previous = piperStates.get(voiceId) || {};
-  setPiperVoiceState(voiceId, { state: "loading", phase: "download", installed: Boolean(previous.installed), error: "" });
-  ui.modelStatus.textContent = `Descargando el modelo oficial ${voice.label}.`;
-  ui.downloadProgress.hidden = false;
-  ui.downloadProgress.removeAttribute("value");
-  updateVoiceProviderUI();
-  renderPlayer(player.snapshot());
-  const task = player.installPiperModel(voiceId).then((result) => {
-    setPiperVoiceState(voiceId, { state: "cached", phase: "download", installed: true, error: "" });
-    ui.modelStatus.textContent = `Modelo Piper descargado y verificado · ${voice.label}. Pulsa «Probar voz» para inicializarlo y escuchar una muestra, o «Preparar voz Piper» para dejarlo listo.`;
-    ui.downloadProgress.hidden = true;
+  const operationId = beginPiperOperation(voiceId, { state: "loading", phase: "download", installed: Boolean(previous.installed), error: "", errorCode: "" });
+  if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+    ui.modelStatus.textContent = `Descargando el modelo oficial ${voice.label}.`;
+    ui.downloadProgress.hidden = false;
+    ui.downloadProgress.removeAttribute("value");
     updateVoiceProviderUI();
     renderPlayer(player.snapshot());
+  }
+  const task = player.installPiperModel(voiceId, operationId).then((result) => {
+    setPiperVoiceState(voiceId, { state: "cached", phase: "download", installed: true, error: "", errorCode: "", operationId });
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = `Modelo Piper descargado y verificado · ${voice.label}. Pulsa «Probar voz» para inicializarlo y escuchar una muestra, o «Preparar voz Piper» para dejarlo listo.`;
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
     return Boolean(result?.installed);
   }).catch((error) => {
-    setPiperVoiceState(voiceId, { state: "error", phase: "download", installed: Boolean(previous.installed), error: error.message || String(error) });
-    ui.modelStatus.textContent = showError(error, "model");
-    ui.downloadProgress.hidden = true;
-    updateVoiceProviderUI();
-    renderPlayer(player.snapshot());
+    setPiperVoiceState(voiceId, { state: "error", phase: error.phase || "download", installed: Boolean(previous.installed), error: error.message || String(error), errorCode: error.code || "PIPER_DOWNLOAD_FAILED", operationId });
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = showError(error, "model");
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
     return false;
   }).finally(() => piperInstallPromises.delete(voiceId));
   piperInstallPromises.set(voiceId, task);
@@ -1200,30 +1277,66 @@ async function initializePiperVoice(voiceId = ui.voice.value) {
   if (voice.provider !== "piper") return false;
   const state = piperStates.get(voiceId);
   if (!state?.installed) {
-    ui.modelStatus.textContent = `Descarga primero ${voice.label}; la descarga es manual y no comienza al cargar el texto.`;
-    updateVoiceProviderUI();
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = `Descarga primero ${voice.label}; la descarga es manual y no comienza al cargar el texto.`;
+      updateVoiceProviderUI();
+    }
     return false;
   }
-  setPiperVoiceState(voiceId, { state: "loading", phase: "initialize", error: "" });
-  ui.modelStatus.textContent = `Inicializando ${voice.label} en el motor local.`;
-  ui.downloadProgress.hidden = false;
-  ui.downloadProgress.removeAttribute("value");
-  updateVoiceProviderUI();
-  renderPlayer(player.snapshot());
-  try {
-    await player.initialize(voiceId);
-    setPiperVoiceState(voiceId, { state: "ready", phase: "initialize", installed: true, error: "" });
-    ui.modelStatus.textContent = `Voz lista · ${voice.label}. El audio WAV se generará al reproducir.`;
-    ui.downloadProgress.hidden = true;
+  const operationId = beginPiperOperation(voiceId, { state: "loading", phase: "initialize", error: "", errorCode: "" });
+  if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+    ui.modelStatus.textContent = `Inicializando ${voice.label} en el motor local.`;
+    ui.downloadProgress.hidden = false;
+    ui.downloadProgress.removeAttribute("value");
     updateVoiceProviderUI();
     renderPlayer(player.snapshot());
+  }
+  try {
+    await player.initialize(voiceId, operationId);
+    setPiperVoiceState(voiceId, { state: "ready", phase: "initialize", installed: true, error: "", errorCode: "", operationId });
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = `Voz lista · ${voice.label}. El audio WAV se generará al reproducir.`;
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
     return true;
   } catch (error) {
-    setPiperVoiceState(voiceId, { state: "error", phase: "initialize", installed: true, error: error.message || String(error) });
-    ui.modelStatus.textContent = showError(error, "model");
-    ui.downloadProgress.hidden = true;
-    updateVoiceProviderUI();
-    renderPlayer(player.snapshot());
+    setPiperVoiceState(voiceId, { state: "error", phase: error.phase || "initialize", installed: true, error: error.message || String(error), errorCode: error.code || "PIPER_INITIALIZATION_FAILED", operationId });
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = showError(error, "model");
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
+    return false;
+  }
+}
+
+async function resetPiperEngine(voiceId = ui.voice.value) {
+  const voice = getVoiceRecord(voiceId);
+  if (voice.provider !== "piper") return false;
+  try {
+    await player.resetPiperEngine(voiceId);
+    const previous = piperStates.get(voiceId) || {};
+    retirePiperOperation(voiceId, previous.operationId);
+    setPiperVoiceState(voiceId, {
+      state: previous.installed ? "cached" : "idle",
+      phase: "initialize",
+      installed: Boolean(previous.installed),
+      operationId: "",
+      error: "",
+      errorCode: ""
+    });
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) {
+      ui.modelStatus.textContent = `Motor Piper restablecido. El modelo local ${previous.installed ? "se conservó" : "no se había instalado"}; puedes volver a intentarlo.`;
+      ui.downloadProgress.hidden = true;
+      updateVoiceProviderUI();
+      renderPlayer(player.snapshot());
+    }
+    return true;
+  } catch (error) {
+    if (isSelectedPiperVoiceMessage(voiceId, ui.voice.value)) ui.modelStatus.textContent = showError(error, "model");
     return false;
   }
 }
@@ -1939,6 +2052,7 @@ ui.voice.addEventListener("change", () => {
 
 ui.loadPlayer.addEventListener("click", () => { void loadEditorToPlayer(); });
 ui.install.addEventListener("click", () => { void handleInstallAction(); });
+ui.resetPiperEngine?.addEventListener("click", () => { void resetPiperEngine(ui.voice.value); });
 ui.test.addEventListener("click", () => {
   const voiceId = ui.voice.value;
   const provider = getVoiceProvider(voiceId);
@@ -2064,7 +2178,11 @@ function showError(error, action = "general") {
   ui.appAlertMessage.textContent = message;
   ui.appAlert.hidden = false;
   ui.errorDetails.hidden = !detail;
-  ui.errorTechnical.textContent = detail;
+  ui.errorTechnical.textContent = [
+    error?.code ? `Código: ${error.code}` : "",
+    error?.phase ? `Fase: ${error.phase}` : "",
+    detail
+  ].filter(Boolean).join(" · ");
   return message;
 }
 

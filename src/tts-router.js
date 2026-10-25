@@ -37,6 +37,10 @@ export class TTSProviderRouter {
   installPiperModel(voiceId, onProgress) { getVoiceRecord(voiceId); return this.piper.installModel(voiceId, onProgress); }
   deletePiperModel(voiceId) { getVoiceRecord(voiceId); return this.piper.removeModel(voiceId); }
   listInstalledPiperModels() { return this.piper.listInstalled(); }
+  resetPiperEngine() {
+    if (typeof this.piper.reset !== "function") throw new Error("El motor Piper no permite restablecer su worker.");
+    return this.piper.reset();
+  }
 
   deleteKokoroModel() {
     if (typeof this.kokoro.deleteModel !== "function") throw new Error("Kokoro no permite eliminar sus recursos locales de forma independiente.");

@@ -49,3 +49,22 @@ test("user-facing errors hide raw runtime diagnostics while retaining useful gui
   assert.match(download, /Comprueba la conexión/);
   assert.match(download, /modelo local/);
 });
+
+test("Piper timeout messages identify the stalled phase and preserve retry guidance", () => {
+  const initialization = userFacingErrorMessage({
+    code: "PIPER_INITIALIZATION_TIMEOUT",
+    phase: "creating-session",
+    message: "Initialization timed out"
+  }, "model");
+  assert.match(initialization, /creación de la sesión de inferencia/);
+  assert.match(initialization, /modelo local se conservó/);
+  assert.match(initialization, /reintentar/);
+
+  const download = userFacingErrorMessage({
+    code: "PIPER_DOWNLOAD_TIMEOUT",
+    phase: "download",
+    message: "download timed out"
+  }, "model");
+  assert.match(download, /descarga de Piper/);
+  assert.match(download, /modelos verificados se conservaron/);
+});
