@@ -1,16 +1,14 @@
 export function deriveReaderControls(modelState, chunkCount, audioPlaying = false, {
-  provider = "kokoro", audioAvailable = false, allowLazyInitialization = false,
-  allowLazyVoiceTest = false
+  provider = "kokoro", audioAvailable = false, allowLazyVoiceTest = false
 } = {}) {
   const modelReady = modelState === "ready";
   const piperProvider = provider === "piper";
-  const lazyStartAvailable = allowLazyInitialization && ["idle", "cached"].includes(modelState);
   const lazyVoiceTestAvailable = allowLazyVoiceTest && (piperProvider
     ? modelState === "cached"
     : ["idle", "cached"].includes(modelState));
   return {
     canInitialize: modelState !== "loading" && !modelReady,
-    canPlay: (modelReady || audioAvailable || (!piperProvider && lazyStartAvailable)) && chunkCount > 0,
+    canPlay: audioAvailable && chunkCount > 0,
     canTestVoice: modelReady,
     canRequestVoiceTest: modelReady || lazyVoiceTestAvailable,
     canPause: audioPlaying

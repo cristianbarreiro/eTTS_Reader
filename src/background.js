@@ -12,6 +12,16 @@ const SELECTION_MENU_ID = "send-selection-to-local-reader";
 const OFFSCREEN_READY_COMMAND = "__offscreen-ready__";
 const OFFSCREEN_READY_TIMEOUT_MS = 8_000;
 const OFFSCREEN_READY_POLL_MS = 100;
+const OFFSCREEN_COMMAND_TIMEOUTS = Object.freeze({
+  defaultMs: 120_000,
+  statusMs: 20_000,
+  prepareAudioMs: 35_000,
+  piperInstallMs: 11 * 60_000,
+  piperInitializeMs: 4 * 60_000,
+  kokoroInitializeMs: 21 * 60_000,
+  previewMs: 6 * 60_000,
+  createMs: 15_000
+});
 let creatingOffscreen = null;
 let creatingContextMenu = null;
 let inMemoryImportTarget = null;
@@ -21,6 +31,31 @@ let followWindowId = null;
 let contextRevision = 0;
 let contextRequestSequence = 0;
 const documentTokens = new Map();
+
+function withMessageDeadline(operation, timeoutMs, command) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error(`El documento de audio no respondió al comando «${command}» dentro del límite de tiempo.`);
+      error.name = "OffscreenMessageTimeoutError";
+      error.code = "OFFSCREEN_MESSAGE_TIMEOUT";
+      error.phase = "offscreen-message";
+      error.command = command;
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+function offscreenCommandTimeout(command, payload = {}) {
+  if (["voice-preparation-status", "piper-model-status", "piper-catalog", "list-installed-piper-models"].includes(command)) return OFFSCREEN_COMMAND_TIMEOUTS.statusMs;
+  if (command === "prepare-audio") return OFFSCREEN_COMMAND_TIMEOUTS.prepareAudioMs;
+  if (command === "install-piper-model") return OFFSCREEN_COMMAND_TIMEOUTS.piperInstallMs;
+  if (command === "initialize") return String(payload.voice || "").startsWith("piper:")
+    ? OFFSCREEN_COMMAND_TIMEOUTS.piperInitializeMs : OFFSCREEN_COMMAND_TIMEOUTS.kokoroInitializeMs;
+  if (command === "preview") return OFFSCREEN_COMMAND_TIMEOUTS.previewMs;
+  return OFFSCREEN_COMMAND_TIMEOUTS.defaultMs;
+}
 
 function selectionUnavailableMessage({ googleDocs = false, authorizedTab = false } = {}) {
   if (googleDocs) {
@@ -59,7 +94,11 @@ async function waitForOffscreenReady() {
   let lastError = null;
   while (Date.now() < deadline) {
     try {
-      const response = await chrome.runtime.sendMessage({ target: "offscreen", command: OFFSCREEN_READY_COMMAND });
+      const response = await withMessageDeadline(
+        () => chrome.runtime.sendMessage({ target: "offscreen", command: OFFSCREEN_READY_COMMAND }),
+        1_000,
+        OFFSCREEN_READY_COMMAND
+      );
       if (response?.offscreenReady === true) return;
       if (response) lastError = new Error("El documento de audio respondió con un estado inesperado.");
     } catch (error) {
@@ -76,12 +115,16 @@ async function waitForOffscreenReady() {
 }
 
 async function sendOffscreen(command, payload = {}, { create = true } = {}) {
-  if (create) await ensureOffscreenDocument();
+  if (create) await withMessageDeadline(ensureOffscreenDocument, OFFSCREEN_COMMAND_TIMEOUTS.createMs, "create-offscreen");
   else if (!(await hasOffscreenDocument())) return { ok: true, sessionId: null, snapshot: null };
   await waitForOffscreenReady();
   let response;
   try {
-    response = await chrome.runtime.sendMessage({ ...payload, target: "offscreen", command });
+    response = await withMessageDeadline(
+      () => chrome.runtime.sendMessage({ ...payload, target: "offscreen", command }),
+      offscreenCommandTimeout(command, payload),
+      command
+    );
   } catch (cause) {
     const error = new Error(`No se pudo entregar el comando «${command}» al motor de lectura local.`);
     error.name = "OffscreenMessageError";

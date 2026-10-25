@@ -143,7 +143,12 @@ export class PiperTTSProvider {
     onProgress({ phase: "initialize", stage: "initializing-onnx", voiceId: voice.id, indeterminate: true });
     const modelBuffer = await installed.model.arrayBuffer();
     onProgress({ phase: "initialize", stage: "creating-session", voiceId: voice.id, indeterminate: true });
-    const session = await module.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] });
+    const session = await module.InferenceSession.create(modelBuffer, {
+      executionProviders: ["wasm"],
+      // Piper voices are large. Keep graph optimizations that improve execution,
+      // but skip the layout pass that can make first-session creation very slow on WASM/CPU.
+      graphOptimizationLevel: "extended"
+    });
     this.session = session;
     this.ort = module;
     this.config = installed.config;

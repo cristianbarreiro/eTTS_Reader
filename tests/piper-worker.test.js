@@ -239,3 +239,33 @@ test("download progress renews inactivity timeout while a silent worker is termi
   assert.equal(stalled.pending.size, 0);
   assert.equal(workersCreated, 1);
 });
+
+test("Piper synthesis timeout terminates a stuck worker and permits initialization on a fresh one", async () => {
+  const voiceId = "piper:es_AR-daniela-high";
+  const workers = [];
+  const client = new PiperWorkerClient({
+    timeouts: { initializeMs: 100, synthesisIdleMs: 25, synthesisMaxMs: 60 },
+    paths: () => ({}),
+    workerFactory: () => {
+      const worker = {
+        postMessage(message) {
+          if (message.type === "initialize") queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: { ready: true } } }));
+          if (message.type === "synthesize" && workers.length > 1) queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: new Blob(["audio"]) } }));
+        },
+        terminate() { this.terminated = true; }
+      };
+      workers.push(worker);
+      return worker;
+    }
+  });
+
+  await client.initialize(voiceId);
+  await assert.rejects(client.synthesize("Hola.", voiceId), (error) => error.code === "PIPER_SYNTHESIS_TIMEOUT" && error.phase === "synthesis");
+  assert.equal(workers[0].terminated, true);
+  assert.equal(client.initializedVoice, null);
+  assert.equal(client.pending.size, 0);
+  await client.initialize(voiceId);
+  assert.equal((await client.synthesize("Hola otra vez.", voiceId)).size, 5);
+  assert.equal(workers.length, 2);
+  client.dispose();
+});

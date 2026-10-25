@@ -38,7 +38,8 @@ Ejecuta toda la suite con npm test. Para investigar un área, localiza los archi
 - Enrutamiento de voces Kokoro/Piper.
 - Catálogos y migración de IDs heredados.
 - Worker y errores de síntesis.
-- Plazos del worker Piper, terminación de workers bloqueados, reintento con worker nuevo y propagación del error al panel.
+- Plazos de comandos del panel, mensajería offscreen y workers de Kokoro/Piper; terminación de workers bloqueados, reintento con instancia nueva y propagación del error al panel.
+- Preparación explícita de las cuatro voces, validación del proveedor/voz/estado real, separación entre preparación y carga de cola, y bloqueo de Play hasta que exista un WAV.
 - Descarga, validación y almacenamiento OPFS de modelos Piper, incluidos timeouts de red/flujo, recuperación de temporales y preservación de modelos válidos.
 - Claves de caché y persistencia IndexedDB.
 - Colas de reproducción, pausa, reanudación, progreso y restauración de sesiones.
@@ -66,10 +67,10 @@ No cargues la raíz del repositorio si el manifiesto de desarrollo indica que la
 Por cada voz Piper soportada en el catálogo:
 
 1. Selecciona la voz y despliega «Modelo y almacenamiento» si todavía no está preparada.
-2. Inicia la descarga explícitamente y revisa el progreso.
-3. Confirma que la voz cambia a estado preparado solo después de validar e instalar los recursos.
-4. Pulsa «Probar voz» con una muestra breve.
-5. Introduce texto español de prueba y pulsa **Cargar al reproductor**. Comprueba que el primer WAV empieza a generarse, que el estado/progreso aparece en el Reproductor y que el audio no se reproduce todavía.
+2. Introduce texto español de prueba y pulsa **Cargar al reproductor** con la voz aún no preparada. Si falta el modelo, este clic inicia explícitamente su descarga y preparación; confirma que el reproductor conserva su cola anterior y no comienza una inferencia nueva.
+3. Confirma que la voz cambia a estado preparado solo después de validar e instalar los recursos. La primera sesión ONNX puede tardar unos minutos; si supera el límite de 180 segundos, debe mostrar un error recuperable y conservar el modelo verificado.
+4. Pulsa **Cargar al reproductor** por segunda vez. Comprueba que entonces se carga el texto, el primer WAV empieza a generarse y el estado/progreso aparece en el Reproductor sin autoplay.
+5. Pulsa «Probar voz» con una muestra breve.
 6. Cuando el fragmento indique que está listo, pulsa **Play** y comprueba pronunciación, continuidad entre fragmentos y ausencia de cortes evidentes. Play debe reproducir el audio preparado sin volver a generarlo.
 7. Comprueba pausa, reanudación, detención, fragmento anterior/siguiente, velocidad, barra de progreso y búsqueda temporal cuando haya duración disponible.
 8. Descarga el WAV y ábrelo en un reproductor independiente.
@@ -80,11 +81,18 @@ Por cada voz Piper soportada en el catálogo:
 
 ### Kokoro: no regresión
 
-1. Prepara el modelo desde la acción explícita de la interfaz.
-2. Pulsa **Cargar al reproductor** con una cola de texto y verifica que el primer WAV se prepara sin autoplay. Prueba también **Probar voz** con af_heart y am_michael.
+1. Con cada voz, pulsa **Cargar al reproductor** cuando el modelo no esté preparado. Confirma que el primer clic prepara Kokoro pero no carga el texto; pulsa una segunda vez y comprueba que aparece la cola.
+2. Verifica que el primer WAV se prepara sin autoplay. Prueba también **Probar voz** con af_heart y am_michael.
 3. Verifica que generan WAV reproducibles y descargables.
 4. Confirma que cambiar una voz o proveedor no reutiliza audio incompatible.
 5. Revisa que eliminar recursos de Piper no elimine Kokoro y viceversa.
+
+### Operaciones detenidas y reintentos
+
+1. Usa los tests de `queue-load-flow.test.js` para verificar que una voz descargada pero no inicializada no reemplaza la cola y que una respuesta obsoleta no continúa el flujo.
+2. Comprueba que una operación de Kokoro que no responde termina dentro del plazo, invalida el worker bloqueado y permite crear uno nuevo sin borrar la caché.
+3. Comprueba que la síntesis directa de ambos proveedores se rechaza si la voz no está preparada; no debe iniciar una inicialización oculta desde Play.
+4. Simula una respuesta ausente del background y confirma que el panel abandona el estado ocupado con un error recuperable. En Edge, repite con un recurso local o una operación que falle y verifica que documentos, modelos verificados y la cola previa permanecen intactos.
 
 ### Persistencia, biblioteca y acciones destructivas
 

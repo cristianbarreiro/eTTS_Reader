@@ -93,7 +93,7 @@ test("Piper initializes only from installed model data and uses the packaged WAS
   assert.equal(onnx.env.wasm.wasmPaths, paths.onnxWasm);
   assert.equal(onnx.env.wasm.numThreads, 1);
   assert.equal(onnx.env.wasm.proxy, false);
-  assert.deepEqual(captured.sessionOptions, { executionProviders: ["wasm"] });
+  assert.deepEqual(captured.sessionOptions, { executionProviders: ["wasm"], graphOptimizationLevel: "extended" });
   assert.equal(captured.modelSize, 3);
   const audio = await provider.synthesize("Hola.", voice.id, paths);
   assert.equal(factoryOptions.locateFile("piper_phonemize.wasm"), paths.phonemizeWasm);

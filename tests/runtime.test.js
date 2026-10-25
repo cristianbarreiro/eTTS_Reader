@@ -58,7 +58,7 @@ test("runtime preflight reports an incompatible extension resource MIME type", a
   );
 });
 
-test("reader controls stay disabled while idle, loading, or failed; retry is enabled", () => {
+test("reader controls allow Play only when a WAV already exists; retry remains enabled", () => {
   for (const status of ["idle", "loading", "error"]) {
     const controls = deriveReaderControls(status, 1);
     assert.equal(controls.canPlay, false);
@@ -66,17 +66,17 @@ test("reader controls stay disabled while idle, loading, or failed; retry is ena
   }
   assert.equal(deriveReaderControls("error", 1).canInitialize, true);
   const ready = deriveReaderControls("ready", 1);
-  assert.equal(ready.canPlay, true);
+  assert.equal(ready.canPlay, false, "an initialized voice does not mean the queue already has audio");
   assert.equal(ready.canTestVoice, true);
   assert.equal(deriveReaderControls("ready", 0).canPlay, false);
 });
 
-test("a loaded queue can start lazy Kokoro initialization, but loading and failed engines remain blocked", () => {
-  assert.equal(deriveReaderControls("idle", 1, false, { allowLazyInitialization: true }).canPlay, true);
-  assert.equal(deriveReaderControls("cached", 1, false, { allowLazyInitialization: true }).canPlay, true);
-  assert.equal(deriveReaderControls("loading", 1, false, { allowLazyInitialization: true }).canPlay, false);
-  assert.equal(deriveReaderControls("error", 1, false, { allowLazyInitialization: true }).canPlay, false);
-  assert.equal(deriveReaderControls("error", 1, false, { allowLazyInitialization: true, audioAvailable: true }).canPlay, true);
+test("an unprepared queue cannot lazily initialize through Play", () => {
+  for (const state of ["idle", "cached", "loading", "error", "ready"]) {
+    assert.equal(deriveReaderControls(state, 1, false, { allowLazyInitialization: true }).canPlay, false);
+  }
+  assert.equal(deriveReaderControls("error", 1, false, { audioAvailable: true }).canPlay, true,
+    "an existing WAV remains playable even if voice initialization later fails");
 });
 
 test("cached model files do not count as an initialized engine", () => {
@@ -108,7 +108,7 @@ test("Piper controls require an installed and initialized engine unless a WAV is
   assert.equal(cachedInstalled.canRequestVoiceTest, true, "an installed model can be initialized by the test action");
   assert.equal(deriveReaderControls("error", 1, false, { provider: "piper", allowLazyVoiceTest: true }).canRequestVoiceTest, false);
   const ready = deriveReaderControls("ready", 1, false, { provider: "piper" });
-  assert.equal(ready.canPlay, true);
+  assert.equal(ready.canPlay, false, "Play waits for generated audio rather than only the initialized Piper model");
   assert.equal(ready.canTestVoice, true);
   assert.equal(ready.canRequestVoiceTest, true);
   const cachedAudio = deriveReaderControls("error", 1, false, { provider: "piper", audioAvailable: true });

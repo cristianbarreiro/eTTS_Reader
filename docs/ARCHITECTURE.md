@@ -45,7 +45,7 @@ flowchart TD
 
 ## 2. Flujo de lectura
 
-1. El usuario introduce/importa texto y pulsa **Cargar al reproductor**. La cola empieza a generar el primer WAV local y el Reproductor muestra la fase o el progreso disponible; esta acción nunca inicia la reproducción. Si falta un modelo Piper, la instalación sigue requiriendo la acción explícita de descarga y la preparación de la cola continúa al terminar.
+1. El usuario introduce/importa texto, elige una voz y pulsa **Cargar al reproductor**. Si la voz seleccionada no está lista, ese primer clic solo descarga/prepara la voz: no reemplaza la cola ni genera audio. La interfaz pide volver a pulsar el botón. En el segundo clic, con la voz lista, reemplaza la cola y empieza a generar el primer WAV local. El reproductor muestra la fase o el progreso disponible; cargar la cola nunca inicia la reproducción. Si la preparación falla, el texto permanece en el editor y la cola actual se conserva.
 2. `ReaderClient` comunica los comandos al background, que enruta al documento offscreen.
 3. `PersistentReaderEngine` mantiene sesión, fragmentos, progreso y política de caché.
 4. `TTSProviderRouter` identifica el proveedor según el ID persistido y llama a Kokoro o Piper.
@@ -62,12 +62,13 @@ El flujo normal de voces no debe utilizar `SpeechSynthesis`: las voces española
 - IDs persistidos actuales: `af_heart` y `am_michael`.
 - Runtime: `kokoro-js` más Transformers.js y la versión de ONNX Runtime que resuelve Transformers.js.
 - Los recursos de runtime y los archivos de voz se copian durante el build desde `vite.config.js`.
-- El modelo se prepara a petición del usuario y su worker no debe inicializarse solo por abrir el panel.
+- El modelo se prepara a petición del usuario y su worker no debe inicializarse solo por abrir el panel. La carga de cola requiere una consulta de estado real; una voz no preparada se inicializa en el primer clic y solo se carga el texto tras una segunda acción.
+- El cliente aplica límites de inactividad y duración máxima a la inicialización y a la síntesis. Si el worker se atasca, lo termina, descarta sus respuestas tardías y permite reintentar con otro worker sin limpiar la caché.
 
 ### Piper
 
 - Catálogo en `src/voice-catalog.js`; actualmente incluye Daniela (`es_AR`, calidad alta) y DaveFX (`es_ES`, calidad media).
-- `PiperWorkerClient` serializa operaciones que comparten la instancia de inferencia; `PiperTTSProvider` ejecuta fonemización e inferencia ONNX en el worker.
+- `PiperWorkerClient` serializa operaciones que comparten la instancia de inferencia; `PiperTTSProvider` ejecuta fonemización e inferencia ONNX en el worker, con WASM/CPU y optimización de grafo `extended` para evitar la costosa fase de optimización de layout al crear una sesión grande.
 - `PiperModelStore` obtiene los modelos desde revisiones fijadas del repositorio de voces, valida configuración y tamaño/hash y conserva los archivos en OPFS.
 - El cliente del worker aplica límites de tiempo para estado, inicialización, síntesis y descarga; la descarga e inferencia también expiran si dejan de enviar progreso. Un timeout termina el worker desde el contexto de control, conserva la última fase informada y libera la cola para un intento nuevo.
 - El restablecimiento del motor no elimina pesos, documentos, sesiones ni WAV y no se permite mientras Piper esté reproduciendo. La siguiente preparación crea un worker nuevo bajo demanda.

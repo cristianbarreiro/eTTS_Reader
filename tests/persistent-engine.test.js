@@ -208,6 +208,7 @@ test("prepare-audio synthesizes the first fragment in the offscreen engine witho
   const started = await engine.handleCommand({ command: "prepare-audio", sessionId: prepared.id });
   assert.equal(started.snapshot.status, "generating");
   assert.equal(audio.playCount, 0);
+  await waitFor(() => calls.length === 1, "the first synthesis did not start after the prepare command returned");
   assert.deepEqual(calls.map(({ text }) => text), ["First."]);
 
   await waitFor(() => engine.player.snapshot().status === "audio-ready");
@@ -339,7 +340,12 @@ test("Piper synthesis diagnostics keep their code and phase in model-state messa
   error.phase = "synthesis";
   const engine = new PersistentReaderEngine({
     audio: new MockAudio(), repository, publish: (message) => published.push(message),
-    inference: { async synthesize() { throw error; }, async initialize() { return { ready: true }; }, async dispose() {} }
+    inference: {
+      async synthesize() { throw error; },
+      preparationStatus(id) { return { provider: "piper", voiceId: id, state: "error", installed: true }; },
+      async initialize() { return { ready: true }; },
+      async dispose() {}
+    }
   });
 
   await engine.handleCommand({ command: "start", session: { ...session(), sourceText: "Hola.", chunks: ["Hola."], voice: voiceId } });

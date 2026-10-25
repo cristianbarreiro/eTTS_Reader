@@ -19,11 +19,19 @@ export class TTSProviderRouter {
 
   async synthesize(text, voice, options = {}) {
     const provider = getVoiceProvider(voice);
+    const status = await this.preparationStatus(voice);
+    const ready = status?.voiceId === voice && status.state === "ready"
+      && (provider !== "piper" || status.installed === true);
+    if (!ready) {
+      const error = new Error("La voz local todavía no está preparada. Pulsa «Cargar al reproductor» para prepararla y vuelve a cargar el texto.");
+      error.name = "VoiceNotPreparedError";
+      error.code = "VOICE_NOT_PREPARED";
+      error.phase = "preflight";
+      throw error;
+    }
     if (provider === "kokoro") {
-      const reportProgress = (event) => options.onProgress?.({ ...event, phase: "initialize" });
-      await this.kokoro.initialize(reportProgress);
       options.onProgress?.({ phase: "synthesis", stage: "synthesizing" });
-      return this.kokoro.synthesize(text, voice);
+      return this.kokoro.synthesize(text, voice, options.onProgress);
     }
     return this.piper.synthesize(text, voice, options.onProgress);
   }
@@ -32,11 +40,13 @@ export class TTSProviderRouter {
   piperModelStatus(voiceId) { getVoiceRecord(voiceId); return this.piper.modelStatus(voiceId); }
   preparationStatus(voiceId) {
     const provider = getVoiceProvider(voiceId);
-    if (provider === "kokoro") return this.kokoro.preparationStatus();
-    if (typeof this.piper.preparationStatus === "function") return this.piper.preparationStatus(voiceId);
+    if (provider === "kokoro") return { ...this.kokoro.preparationStatus(), voiceId };
+    if (typeof this.piper.preparationStatus === "function") {
+      return Promise.resolve(this.piper.preparationStatus(voiceId)).then((status) => ({ ...status, provider, voiceId }));
+    }
     return this.piper.listInstalled().then((voices) => {
       const status = voices.find((voice) => voice.voiceId === voiceId);
-      return status || { provider, voiceId, state: "idle", installed: false };
+      return { ...status, provider, voiceId, state: status?.state || "idle", installed: status?.installed === true };
     });
   }
   installPiperModel(voiceId, onProgress) { getVoiceRecord(voiceId); return this.piper.installModel(voiceId, onProgress); }

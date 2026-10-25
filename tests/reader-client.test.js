@@ -96,6 +96,19 @@ test("voice preparation state requests are read-only background queries", async 
   client.dispose();
 });
 
+test("a background command that never answers rejects on its bounded deadline", async () => {
+  const runtime = fakeRuntime(() => new Promise(() => {}));
+  const client = new ReaderClient({ runtime, timeouts: { statusMs: 8 } });
+
+  await assert.rejects(client.voicePreparationStatus("af_heart"), (error) => {
+    assert.equal(error.code, "READER_COMMAND_TIMEOUT");
+    assert.equal(error.phase, "background-message");
+    assert.equal(error.command, "voice-preparation-status");
+    return true;
+  });
+  client.dispose();
+});
+
 test("Piper operation identifiers reach the offscreen coordinator and coded errors survive the message bridge", async () => {
   const diagnostics = { name: "TypeError", message: "Illegal invocation", phase: "initializing-onnx", stack: "TypeError: Illegal invocation\\n at fetch" };
   const runtime = fakeRuntime(async ({ command }) => command === "initialize"
@@ -176,6 +189,71 @@ test("Kokoro worker is not created on panel startup and can be disposed after ex
   assert.equal(terminated, 1);
 });
 
+test("Kokoro synthesis refuses to initialize implicitly and requires a prepared voice", async () => {
+  let created = 0;
+  const client = new KokoroWorkerClient({ workerFactory: () => { created++; return {}; } });
+  assert.throws(() => client.synthesize("Hello.", "af_heart"), (error) => error.code === "KOKORO_VOICE_NOT_PREPARED");
+  assert.equal(created, 0);
+  assert.equal(client.preparationStatus().state, "idle");
+});
+
+test("Kokoro timeout terminates a stuck worker and permits a clean preparation retry", async () => {
+  const workers = [];
+  const client = new KokoroWorkerClient({
+    timeouts: { initializeIdleMs: 8, initializeMaxMs: 30 },
+    workerFactory: () => {
+      const worker = {
+        postMessage(message) {
+          if (workers.length > 1 && message.type === "initialize") {
+            queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: { voices: ["af_heart", "am_michael"] } } }));
+          }
+        },
+        terminate() { this.terminated = true; }
+      };
+      workers.push(worker);
+      return worker;
+    }
+  });
+
+  await assert.rejects(client.initialize(), (error) => error.code === "KOKORO_INITIALIZATION_TIMEOUT" && error.phase === "initialize");
+  assert.equal(workers[0].terminated, true);
+  assert.equal(client.preparationStatus().state, "error");
+  assert.equal(client.pending.size, 0);
+
+  assert.deepEqual(await client.initialize(), { voices: ["af_heart", "am_michael"] });
+  assert.equal(workers.length, 2);
+  assert.equal(client.preparationStatus().state, "ready");
+  assert.equal(client.pending.size, 0);
+  await client.dispose();
+});
+
+test("Kokoro synthesis timeout releases the worker and permits a new synthesis after preparation", async () => {
+  const workers = [];
+  const client = new KokoroWorkerClient({
+    timeouts: { initializeIdleMs: 100, initializeMaxMs: 200, synthesisIdleMs: 25, synthesisMinMs: 60, synthesisMaxMs: 100 },
+    workerFactory: () => {
+      const worker = {
+        postMessage(message) {
+          if (message.type === "initialize") queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: { voices: ["af_heart"] } } }));
+          if (message.type === "synthesize" && workers.length > 1) queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: new Blob(["audio"]) } }));
+        },
+        terminate() { this.terminated = true; }
+      };
+      workers.push(worker);
+      return worker;
+    }
+  });
+
+  await client.initialize();
+  await assert.rejects(client.synthesize("Hello.", "af_heart"), (error) => error.code === "KOKORO_SYNTHESIS_TIMEOUT" && error.phase === "synthesis");
+  assert.equal(workers[0].terminated, true);
+  assert.equal(client.preparationStatus().state, "error");
+  await client.initialize();
+  assert.equal((await client.synthesize("Hello again.", "af_heart")).size, 5);
+  assert.equal(workers.length, 2);
+  await client.dispose();
+});
+
 test("Piper installed-voice status distinguishes cached files from a prepared runtime", async () => {
   const voiceId = "piper:es_AR-daniela-high";
   const worker = {
@@ -192,4 +270,11 @@ test("Piper installed-voice status distinguishes cached files from a prepared ru
   await client.initialize(voiceId);
   assert.deepEqual(await client.listInstalled(), [{ voiceId, installed: true, state: "ready" }]);
   await client.dispose();
+});
+
+test("Piper synthesis refuses to initialize implicitly", async () => {
+  let created = 0;
+  const client = new PiperWorkerClient({ workerFactory: () => { created++; return {}; }, paths: () => ({}) });
+  await assert.rejects(client.synthesize("Hola.", "piper:es_AR-daniela-high"), (error) => error.code === "PIPER_VOICE_NOT_PREPARED");
+  assert.equal(created, 0);
 });

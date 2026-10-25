@@ -1,6 +1,8 @@
 import { KokoroTTS } from "kokoro-js";
+import { RawAudio } from "@huggingface/transformers";
 import { env } from "@huggingface/transformers";
 import { resolveKokoroAssetUrls, verifyWasmAssets } from "./onnx-assets.js";
+import { synthesizeKokoroText } from "./kokoro-audio.js";
 
 export class TTSProvider {
   async initialize() { throw new Error("initialize() no implementado"); }
@@ -50,11 +52,10 @@ export class LocalKokoroProvider extends TTSProvider {
 
   voices() { return this.model ? VOICES.filter((voice) => this.model.voices[voice]) : []; }
 
-  async synthesize(text, { voice, speed }) {
+  async synthesize(text, { voice, speed, onProgress = () => {} }) {
     if (!this.model) throw new Error("El modelo local no está listo.");
     if (!this.voices().includes(voice)) throw new Error("El paquete local no incluye esa voz.");
-    const audio = await this.model.generate(text, { voice, speed });
-    return audio.toBlob();
+    return synthesizeKokoroText(this.model, text, { voice, speed, onProgress, RawAudio });
   }
 
   async dispose() { this.model = null; }

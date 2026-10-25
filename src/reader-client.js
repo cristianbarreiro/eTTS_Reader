@@ -1,5 +1,24 @@
 import { getVoiceProvider } from "./voice-catalog.js";
 
+export const READER_COMMAND_TIMEOUTS = Object.freeze({
+  defaultMs: 120_000,
+  statusMs: 20_000,
+  prepareAudioMs: 30_000,
+  piperInstallMs: 11 * 60_000,
+  piperInitializeMs: 220_000,
+  kokoroInitializeMs: 21 * 60_000,
+  previewMs: 5 * 60_000
+});
+
+function timeoutForCommand(command, payload, timeouts) {
+  if (command === "voice-preparation-status" || command === "piper-model-status" || command === "piper-catalog" || command === "list-installed-piper-models") return timeouts.statusMs;
+  if (command === "prepare-audio") return timeouts.prepareAudioMs;
+  if (command === "install-piper-model") return timeouts.piperInstallMs;
+  if (command === "initialize") return String(payload.voice || "").startsWith("piper:") ? timeouts.piperInitializeMs : timeouts.kokoroInitializeMs;
+  if (command === "preview") return timeouts.previewMs;
+  return timeouts.defaultMs;
+}
+
 function snapshotFromSession(session = null) {
   const chunks = Array.isArray(session?.chunks) ? [...session.chunks] : [];
   const index = Math.max(0, Math.min(Number(session?.selectedIndex) || 0, Math.max(0, chunks.length - 1)));
@@ -38,11 +57,14 @@ function snapshotFromSession(session = null) {
 }
 
 export class ReaderClient {
-  constructor({ runtime = globalThis.chrome?.runtime, onState = () => {}, onModel = () => {} } = {}) {
+  constructor({ runtime = globalThis.chrome?.runtime, onState = () => {}, onModel = () => {}, timeouts = READER_COMMAND_TIMEOUTS, setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout } = {}) {
     if (!runtime) throw new Error("No se pudo conectar con la coordinación de la extensión.");
     this.runtime = runtime;
     this.onState = onState;
     this.onModel = onModel;
+    this.timeouts = { ...READER_COMMAND_TIMEOUTS, ...timeouts };
+    this.setTimer = setTimer.bind(globalThis);
+    this.clearTimer = clearTimer.bind(globalThis);
     this.session = null;
     this.state = snapshotFromSession();
     this.listener = (message) => {
@@ -76,7 +98,27 @@ export class ReaderClient {
   }
 
   async request(command, payload = {}) {
-    const response = await this.runtime.sendMessage({ target: "background", command, payload });
+    const timeoutMs = timeoutForCommand(command, payload, this.timeouts);
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = this.setTimer(() => {
+        const error = new Error(`El comando «${command}» no recibió respuesta en ${Math.round(timeoutMs / 1000)} segundos. Puedes reintentar; los datos locales se conservan.`);
+        error.name = "ReaderCommandTimeoutError";
+        error.code = "READER_COMMAND_TIMEOUT";
+        error.phase = "background-message";
+        error.command = command;
+        reject(error);
+      }, timeoutMs);
+    });
+    let response;
+    try {
+      response = await Promise.race([
+        Promise.resolve().then(() => this.runtime.sendMessage({ target: "background", command, payload })),
+        timeout
+      ]);
+    } finally {
+      this.clearTimer(timeoutId);
+    }
     if (response?.ok === false) {
       const error = new Error(response.error || "Falló el motor local de lectura.");
       if (response.code) error.code = response.code;

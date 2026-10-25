@@ -3,6 +3,7 @@ import { serializeErrorDiagnostics } from "./error-diagnostics.js";
 
 export function attachPiperWorker(scope, provider = new PiperTTSProvider()) {
   let wasmPaths = null;
+  let initializedVoice = null;
 
   const onMessage = async ({ data }) => {
     const { id, type } = data;
@@ -16,11 +17,21 @@ export function attachPiperWorker(scope, provider = new PiperTTSProvider()) {
       else if (type === "initialize") {
         wasmPaths = data.wasmPaths;
         value = await provider.initialize(data.voiceId, wasmPaths, reportProgress);
+        initializedVoice = data.voiceId;
       } else if (type === "synthesize") {
+        if (initializedVoice !== data.voiceId) {
+          const error = new Error("Piper todavía no está preparado para esta voz.");
+          error.code = "PIPER_VOICE_NOT_PREPARED";
+          error.phase = "preflight";
+          throw error;
+        }
         value = await provider.synthesize(data.text, data.voiceId, wasmPaths, reportProgress);
-      } else if (type === "remove") value = await provider.removeModel(data.voiceId);
-      else if (type === "dispose") {
+      } else if (type === "remove") {
+        value = await provider.removeModel(data.voiceId);
+        if (initializedVoice === data.voiceId) initializedVoice = null;
+      } else if (type === "dispose") {
         await provider.dispose();
+        initializedVoice = null;
         value = true;
       } else throw new Error(`Comando Piper desconocido: ${type}`);
       scope.postMessage({ id, type: "result", value });

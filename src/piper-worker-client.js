@@ -3,8 +3,8 @@ import { PIPER_VOICE_CATALOG } from "./voice-catalog.js";
 export const PIPER_OPERATION_TIMEOUTS = Object.freeze({
   statusMs: 15_000,
   initializeMs: 180_000,
-  synthesisIdleMs: 90_000,
-  synthesisMaxMs: 15 * 60_000,
+  synthesisIdleMs: 300_000,
+  synthesisMaxMs: 30 * 60_000,
   downloadIdleMs: 45_000,
   downloadMaxMs: 10 * 60_000
 });
@@ -42,10 +42,10 @@ function requestTimeout(type, payload, timeouts) {
     const textLength = String(payload.text || "").length;
     return {
       idleMs: timeouts.synthesisIdleMs,
-      totalMs: Math.min(timeouts.synthesisMaxMs, Math.max(180_000, textLength * 500)),
+      totalMs: Math.min(timeouts.synthesisMaxMs, Math.max(300_000, textLength * 1_000)),
       code: "PIPER_SYNTHESIS_TIMEOUT",
       phase: "synthesis",
-      message: "La síntesis Piper dejó de responder. El worker se reinició; puedes volver a intentarlo."
+      message: "La síntesis Piper dejó de responder o superó su límite de tiempo. El worker se reinició; puedes volver a intentarlo."
     };
   }
   if (type === "install") return {
@@ -246,7 +246,12 @@ export class PiperWorkerClient {
 
   synthesize(text, voiceId, onProgress = () => {}) {
     return this._enqueue(async () => {
-      await this._initializeUnlocked(voiceId, onProgress);
+      if (this.initializedVoice !== voiceId) {
+        throw piperError("PIPER_VOICE_NOT_PREPARED", "Piper todavía no está preparado para esta voz. Pulsa Cargar al reproductor para prepararla y vuelve a cargar el texto.", {
+          operation: "synthesize",
+          phase: "preflight"
+        });
+      }
       return this._request("synthesize", { text, voiceId, wasmPaths: this.paths() }, onProgress);
     });
   }

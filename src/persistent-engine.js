@@ -188,23 +188,14 @@ export class PersistentReaderEngine {
         this._publish("reader:error", { message: `No se pudo guardar el estado del fragmento: ${error.message}` });
       });
     }
-    let operationId = null;
     const task = this.synthesisTail.then(async () => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
       const cached = await this.repository.getAudioChunk(id);
       if (cached?.blob instanceof Blob && cached.blob.size > 0) return cached.blob;
-      operationId = this._nextModelOperationId();
-      this._publish("reader:model", {
-        provider,
-        voiceId: voice,
-        state: "loading",
-        operationId,
-        message: provider === "piper" ? `Preparando Piper local para ${voiceRecord.label}.` : "Preparando Kokoro local en segundo plano."
-      });
       const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
         onProgress: (event) => {
           try { onProgress(event); } catch { /* Player progress is observational and cannot interrupt synthesis. */ }
-          this._publish("reader:model-progress", { provider, voiceId: voice, operationId, event });
+          this._publish("reader:model-progress", { provider, voiceId: voice, event });
         }
       }));
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
@@ -222,13 +213,6 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, audioKeys, chunkStates, lastError: "" };
         await this.repository.saveSession(this.activeSession);
       }
-      if (operationId) this._publish("reader:model", {
-        provider,
-        voiceId: voice,
-        state: "ready",
-        operationId,
-        message: provider === "piper" ? `Piper local listo · ${voiceRecord.label}.` : "Kokoro local listo."
-      });
       return blob;
     }).catch((error) => {
       if (generation === this.sessionGeneration && isSessionChunk && this.activeSession?.chunks[index] === text) {
@@ -237,15 +221,21 @@ export class PersistentReaderEngine {
         this.activeSession = { ...this.activeSession, chunkStates, lastError: error.message || "No se pudo generar este fragmento." };
         this.saveTail = this.saveTail.then(() => this.repository.saveSession(this.activeSession)).catch(() => {});
       }
-      if (generation === this.sessionGeneration && operationId) this._publish("reader:model", {
-        provider,
-        voiceId: voice,
-        state: "error",
-        operationId,
-        phase: error.phase,
-        code: error.code,
-        message: error.message || `No se pudo preparar ${provider === "piper" ? "Piper" : "Kokoro"}.`
-      });
+      if (generation === this.sessionGeneration && typeof this.inference.preparationStatus === "function") {
+        void Promise.resolve().then(() => this.inference.preparationStatus(voice)).then((status) => {
+          const stillReady = status?.state === "ready" && (provider !== "piper" || status.installed === true);
+          if (stillReady || generation !== this.sessionGeneration || this.activeSession?.voice !== voice) return;
+          this._publish("reader:model", {
+            provider,
+            voiceId: voice,
+            state: "error",
+            phase: error.phase || "synthesis",
+            code: error.code,
+            diagnostics: serializeErrorDiagnostics(error),
+            message: error.message || `No se pudo recuperar el motor ${provider === "piper" ? "Piper" : "Kokoro"}.`
+          });
+        }).catch(() => {});
+      }
       throw error;
     }).finally(() => { if (this.inFlightAudio.get(id)?.task === task) this.inFlightAudio.delete(id); });
     this.inFlightAudio.set(id, { generation, task });
