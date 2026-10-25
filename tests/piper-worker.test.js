@@ -121,6 +121,36 @@ test("Piper client preserves worker diagnostics on its rejected request", async 
   client.dispose();
 });
 
+test("Piper client binds native timeout APIs to the global receiver", async () => {
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  function receiverSensitiveSetTimeout(callback, delay) {
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    return nativeSetTimeout(callback, delay);
+  }
+  function receiverSensitiveClearTimeout(handle) {
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    return nativeClearTimeout(handle);
+  }
+  const client = new PiperWorkerClient({
+    setTimer: receiverSensitiveSetTimeout,
+    clearTimer: receiverSensitiveClearTimeout,
+    workerFactory: () => ({
+      postMessage(message) {
+        queueMicrotask(() => this.onmessage({ data: {
+          id: message.id, type: "result", value: { voiceId: message.voiceId, installed: true }
+        } }));
+      },
+      terminate() {}
+    })
+  });
+
+  assert.deepEqual(await client.modelStatus("piper:es_AR-daniela-high"), {
+    voiceId: "piper:es_AR-daniela-high", installed: true
+  });
+  client.dispose();
+});
+
 test("a timed-out initialization terminates its worker and the operation queue can create a fresh worker", async () => {
   const voiceId = "piper:es_AR-daniela-high";
   const workers = [];

@@ -68,12 +68,14 @@ function hasValidProgress(event) {
 }
 
 export class PiperWorkerClient {
-  constructor({ workerFactory = () => new Worker(new URL("./piper-tts-worker.js", import.meta.url), { type: "module", name: "piper-local-inference" }), paths = assetPaths, timeouts = PIPER_OPERATION_TIMEOUTS, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({ workerFactory = () => new Worker(new URL("./piper-tts-worker.js", import.meta.url), { type: "module", name: "piper-local-inference" }), paths = assetPaths, timeouts = PIPER_OPERATION_TIMEOUTS, setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout } = {}) {
     this.workerFactory = workerFactory;
     this.paths = paths;
     this.timeouts = { ...PIPER_OPERATION_TIMEOUTS, ...timeouts };
-    this.setTimer = setTimer;
-    this.clearTimer = clearTimer;
+    // Browser timer APIs require their global receiver. _request calls these
+    // as instance methods, so bind both defaults and injected host functions.
+    this.setTimer = setTimer.bind(globalThis);
+    this.clearTimer = clearTimer.bind(globalThis);
     this.worker = null;
     this.workerGeneration = 0;
     this.pending = new Map();
