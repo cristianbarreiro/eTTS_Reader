@@ -28,6 +28,19 @@ test("document progress captions distinguish measured duration and pending fragm
   assert.equal(readingProgressCaption({ ...base, chunks: [] }), "Sin progreso");
 });
 
+test("Kokoro model inference stays indeterminate and reports elapsed time without a fabricated percentage", () => {
+  const caption = readingProgressCaption({
+    status: "generating",
+    generationStage: "model-generate",
+    generationProgress: null,
+    generationCompletedParts: 0,
+    generationTotalParts: 3,
+    generationElapsedMs: 48_000
+  });
+  assert.equal(caption, "Inferencia Kokoro · parte 1/3 · 0:48 transcurridos");
+  assert.doesNotMatch(caption, /0%/);
+});
+
 test("duration summary never presents zero as a measured duration before audio metadata exists", () => {
   const queued = { chunks: ["Hello."], durations: [null], totalDuration: null, knownDurationCount: 0, activeKind: "chunk" };
   assert.equal(readingDurationSummary(queued, "kokoro"), "Duración conocida — · total pendiente (0/1 fragmentos medidos)");

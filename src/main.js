@@ -112,6 +112,7 @@ let fileSelectionPurpose = "document";
 let queueLoadBusy = false;
 let queueLoadPhase = "voice";
 let queueLoadSequence = 0;
+let playerGenerationTimer = null;
 let staleQueueStopPending = false;
 let staleQueueStopPromise = null;
 const DOCUMENT_FILE_ACCEPT = ".pdf,.docx,.txt,.md,.markdown,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -119,7 +120,7 @@ const panelStatus = createPanelStatusState();
 
 const player = new ReaderClient({
   onState: (snapshot) => {
-    if (snapshot.activeKind !== "preview" && player?.session?.id) {
+    if (!snapshot.queuePreparation && snapshot.activeKind !== "preview" && player?.session?.id) {
       const loadedSession = {
         ...player.session,
         selectedIndex: snapshot.selectedIndex,
@@ -334,8 +335,17 @@ function describePlayer(snapshot) {
     if (snapshot.activeKind === "preview") return "Preparando una muestra local de voz.";
     const fragment = `fragmento ${snapshot.selectedIndex + 1} de ${snapshot.chunks.length}`;
     if (snapshot.generationPhase === "initialize") return `Preparando la voz local para generar el ${fragment}.`;
+    if (snapshot.generationStage === "model-generate") {
+      const part = Number.isInteger(snapshot.generationTotalParts) && snapshot.generationTotalParts > 1
+        ? `, parte ${Math.max(1, Number(snapshot.generationCompletedParts) + 1)} de ${snapshot.generationTotalParts}` : "";
+      const elapsed = Number.isFinite(snapshot.generationElapsedMs)
+        ? ` · ${formatTime(Math.floor(snapshot.generationElapsedMs / 1000))} transcurridos` : "";
+      return `Kokoro está calculando ${fragment}${part}${elapsed}. Esta etapa no informa un porcentaje interno.`;
+    }
     if (Number.isFinite(snapshot.generationProgress)) return `Generando el ${fragment} · ${Math.round(snapshot.generationProgress * 100)}%.`;
-    return `Generando el ${fragment}…`;
+    const elapsed = Number.isFinite(snapshot.generationElapsedMs)
+      ? ` · ${formatTime(Math.floor(snapshot.generationElapsedMs / 1000))} transcurridos` : "";
+    return `Generando el ${fragment}${elapsed}…`;
   }
   if (snapshot.status === "audio-ready") return snapshot.activeKind === "preview"
     ? "La muestra local está lista para reproducirse."
@@ -414,6 +424,31 @@ function renderPlayer(snapshot) {
     : describePlayer(snapshot) || (hasText ? "La cola está lista para reproducirse." : "Pega o carga texto para empezar.");
   if (ui.playbackStatus.textContent !== message) ui.playbackStatus.textContent = message;
   updateQueueSyncUI();
+  syncPlayerGenerationTimer(snapshot);
+}
+
+function syncPlayerGenerationTimer(snapshot) {
+  const pending = ["generating", "starting"].includes(snapshot.status);
+  if (!pending) {
+    if (playerGenerationTimer !== null) clearInterval(playerGenerationTimer);
+    playerGenerationTimer = null;
+    return;
+  }
+  if (playerGenerationTimer !== null) return;
+  playerGenerationTimer = setInterval(() => {
+    const current = player.snapshot();
+    if (!["generating", "starting"].includes(current.status)) {
+      clearInterval(playerGenerationTimer);
+      playerGenerationTimer = null;
+      return;
+    }
+    const activeProvider = current.activeProvider || getVoiceProvider(ui.voice.value);
+    const caption = readingProgressCaption({ ...current, activeProvider });
+    ui.progressCaption.textContent = caption;
+    ui.progress.setAttribute("aria-valuetext", caption);
+    const staleQueue = current.activeKind !== "preview" && !currentQueueMatchesEditor();
+    if (!staleQueue) ui.playbackStatus.textContent = describePlayer(current);
+  }, 1000);
 }
 
 async function refreshDownloadLink(audioKey) {
@@ -712,6 +747,8 @@ async function loadEditorToPlayer() {
   let loadFailure = "";
   let loadNotice = "";
   let queueMutated = false;
+  let queuePreparationStarted = false;
+  let queuePreparationId = "";
   let previousQueue = player.session ? { ...player.session } : null;
   const operationSequence = ++queueLoadSequence;
   const isCurrent = () => operationSequence === queueLoadSequence && ui.voice.value === voice && String(ui.text.value ?? "") === text;
@@ -745,6 +782,19 @@ async function loadEditorToPlayer() {
           now: () => Date.now()
         });
         if (!isCurrent()) return false;
+        queuePreparationId = makeId("queue-preparation");
+        queuePreparationStarted = true;
+        const firstAudio = await player.prepareQueueAudio(prepared, queuePreparationId);
+        if (!isCurrent()) {
+          void player.cancelQueueAudioPreparation(queuePreparationId).catch(() => {});
+          return false;
+        }
+        const audioKeys = [...(prepared.audioKeys || [])];
+        const chunkStates = [...(prepared.chunkStates || prepared.chunks.map(() => "pending"))];
+        audioKeys[0] = firstAudio.audioKey;
+        chunkStates[0] = "ready";
+        prepared.audioKeys = audioKeys;
+        prepared.chunkStates = chunkStates;
         queueMutated = true;
         await player.replace(prepared);
         currentSession = player.session || prepared;
@@ -768,9 +818,10 @@ async function loadEditorToPlayer() {
     }
     return result.action === "queue-loaded" && result.result === true;
   } catch (error) {
+    if (queuePreparationId && !queueMutated) void player.cancelQueueAudioPreparation(queuePreparationId).catch(() => {});
     if (queueMutated) player.setSession(previousQueue);
     const message = showError(error, "playback");
-    loadFailure = error.phase === "preflight" || String(error.code || "").startsWith("PIPER_") || String(error.code || "").startsWith("KOKORO_")
+    loadFailure = queuePreparationStarted || error.phase === "preflight" || String(error.code || "").startsWith("PIPER_") || String(error.code || "").startsWith("KOKORO_")
       ? `No se pudo preparar la voz local. El editor y la cola anterior se conservaron. ${message}`
       : `No se pudo cargar el contenido. El editor sigue intacto. ${message}`;
     return false;

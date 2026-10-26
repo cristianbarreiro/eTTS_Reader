@@ -176,6 +176,39 @@ test("preparing the queue generates its first WAV without autoplay and Play reus
   assert.deepEqual(synthCalls.map(({ text }) => text), ["Prepare this first."], "Play reuses the prepared WAV");
 });
 
+test("Kokoro part inference is visibly indeterminate with elapsed time and clears on completion", async () => {
+  const updates = [];
+  let resolveSynthesis;
+  const { audio, player } = makePlayer({
+    onState: (snapshot) => updates.push(snapshot),
+    synthesize: async (_text, { onProgress }) => {
+      onProgress({
+        phase: "synthesis", stage: "model-generate", requestId: 7, voiceId: "af_heart",
+        textLength: 42, completedParts: 0, totalParts: 3, progress: null
+      });
+      return new Promise((resolve) => { resolveSynthesis = resolve; });
+    }
+  });
+  player.setChunks(["A bounded synthesis sample."]);
+  const preparing = player.prepare();
+  await waitFor(() => typeof resolveSynthesis === "function");
+  const pending = player.snapshot();
+  assert.equal(pending.status, "generating");
+  assert.equal(pending.generationProgress, null);
+  assert.equal(pending.generationStage, "model-generate");
+  assert.equal(pending.generationRequestId, 7);
+  assert.equal(pending.generationTextLength, 42);
+  assert.ok(pending.generationElapsedMs >= 0);
+  assert.ok(updates.some((snapshot) => snapshot.status === "generating" && snapshot.generationProgress === null));
+
+  resolveSynthesis(makeWavBlob());
+  assert.equal(await preparing, true);
+  assert.equal(player.snapshot().status, "audio-ready");
+  assert.equal(player.snapshot().generationStartedAt, null);
+  assert.equal(player.snapshot().generationElapsedMs, null);
+  assert.equal(audio.playCount, 0);
+});
+
 test("pause and resume preserve the current position and reuse the WAV", async () => {
   const { audio, player, synthCalls } = makePlayer();
   player.setChunks(["Resume this clip."]);

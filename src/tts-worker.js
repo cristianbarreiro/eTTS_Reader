@@ -14,12 +14,22 @@ self.addEventListener("message", async ({ data }) => {
     } else if (type === "synthesize") {
       if (!initializePromise) throw new Error("El modelo local todavía no está listo.");
       await initializePromise;
-      self.postMessage({ id, type: "progress", event: { phase: "synthesis", stage: "synthesizing" } });
+      self.postMessage({ id, type: "progress", event: {
+        phase: "synthesis", stage: "request-started", requestId: id,
+        voiceId: data.voice, textLength: String(data.text || "").length
+      } });
       const blob = await provider.synthesize(data.text, {
         voice: data.voice,
         speed: 1,
-        onProgress: (event) => self.postMessage({ id, type: "progress", event: { ...event, phase: "synthesis" } })
+        onProgress: (event) => self.postMessage({ id, type: "progress", event: {
+          ...event, phase: "synthesis", requestId: id,
+          voiceId: data.voice, textLength: String(data.text || "").length
+        } })
       });
+      self.postMessage({ id, type: "progress", event: {
+        phase: "synthesis", stage: "synthesis-complete", requestId: id,
+        voiceId: data.voice, textLength: String(data.text || "").length
+      } });
       self.postMessage({ id, type: "result", value: blob });
     } else if (type === "dispose") {
       await provider.dispose();
@@ -30,7 +40,11 @@ self.addEventListener("message", async ({ data }) => {
     }
   } catch (error) {
     if (type === "initialize") initializePromise = null;
-    const diagnostics = serializeErrorDiagnostics(error);
+    const diagnostics = {
+      ...serializeErrorDiagnostics(error),
+      requestId: id,
+      ...(type === "synthesize" ? { voiceId: String(data.voice || ""), textLength: String(data.text || "").length } : {})
+    };
     self.postMessage({
       id, type: "error",
       code: diagnostics.code || "KOKORO_WORKER_OPERATION_FAILED",

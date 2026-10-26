@@ -45,6 +45,11 @@ export class PlaybackController {
       message: "",
       generationProgress: null,
       generationPhase: "",
+      generationStage: "",
+      generationStartedAt: null,
+      generationRequestId: null,
+      generationVoiceId: null,
+      generationTextLength: null,
       generationCompletedParts: null,
       generationTotalParts: null,
       downloadUrl: null,
@@ -106,6 +111,8 @@ export class PlaybackController {
       ...this.state,
       chunks,
       durations,
+      generationElapsedMs: this.state.status === "generating" && Number.isFinite(this.state.generationStartedAt)
+        ? Math.max(0, Date.now() - this.state.generationStartedAt) : null,
       knownDurationCount,
       totalDuration,
       totalProgress,
@@ -121,6 +128,18 @@ export class PlaybackController {
 
   _publish() {
     this.onState(this.snapshot());
+  }
+
+  _resetGeneration() {
+    this.state.generationProgress = null;
+    this.state.generationPhase = "";
+    this.state.generationStage = "";
+    this.state.generationStartedAt = null;
+    this.state.generationRequestId = null;
+    this.state.generationVoiceId = null;
+    this.state.generationTextLength = null;
+    this.state.generationCompletedParts = null;
+    this.state.generationTotalParts = null;
   }
 
   _syncTime() {
@@ -217,10 +236,7 @@ export class PlaybackController {
     if (token !== this.operationId) return;
     this.state.status = "error";
     this.state.synthesisStatus = "idle";
-    this.state.generationProgress = null;
-    this.state.generationPhase = "";
-    this.state.generationCompletedParts = null;
-    this.state.generationTotalParts = null;
+    this._resetGeneration();
     this.state.playingIndex = null;
     this.state.message = error?.message || "No se pudo preparar o reproducir el audio.";
     this._publish();
@@ -238,10 +254,7 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = null;
     this.state.synthesisStatus = "idle";
-    this.state.generationProgress = null;
-    this.state.generationPhase = "";
-    this.state.generationCompletedParts = null;
-    this.state.generationTotalParts = null;
+    this._resetGeneration();
     this.state.status = chunks.length ? "text-ready" : "empty";
     this.state.message = chunks.length ? "Texto preparado para leer." : "Pega o carga texto para empezar.";
     this.restartOnPlay = false;
@@ -266,10 +279,7 @@ export class PlaybackController {
     this.state.speed = Number.isFinite(Number(speed)) ? Number(speed) : 1;
     this.audio.playbackRate = this.state.speed;
     this.state.synthesisStatus = "idle";
-    this.state.generationProgress = null;
-    this.state.generationPhase = "";
-    this.state.generationCompletedParts = null;
-    this.state.generationTotalParts = null;
+    this._resetGeneration();
     this.state.status = ["playing", "generating", "audio-ready", "interrupted"].includes(status)
       ? "interrupted"
       : status === "paused" || status === "error" || status === "stopped" || status === "completed"
@@ -334,6 +344,11 @@ export class PlaybackController {
     this.state.status = "generating";
     this.state.generationProgress = null;
     this.state.generationPhase = "synthesis";
+    this.state.generationStage = "request-started";
+    this.state.generationStartedAt = Date.now();
+    this.state.generationRequestId = null;
+    this.state.generationVoiceId = voice;
+    this.state.generationTextLength = text.length;
     this.state.generationCompletedParts = null;
     this.state.generationTotalParts = null;
     this.state.currentTime = 0;
@@ -353,6 +368,10 @@ export class PlaybackController {
           ? event.loaded / event.total * 100
           : null;
       this.state.generationPhase = phase;
+      this.state.generationStage = String(event.stage || "");
+      this.state.generationRequestId = event.requestId ?? this.state.generationRequestId;
+      this.state.generationVoiceId = event.voiceId || this.state.generationVoiceId;
+      this.state.generationTextLength = Number.isFinite(event.textLength) ? event.textLength : this.state.generationTextLength;
       this.state.generationProgress = rawProgress === null
         ? null
         : Math.max(0, Math.min(1, rawProgress / 100));
@@ -372,10 +391,7 @@ export class PlaybackController {
       });
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
-      this.state.generationProgress = null;
-      this.state.generationPhase = "";
-      this.state.generationCompletedParts = null;
-      this.state.generationTotalParts = null;
+      this._resetGeneration();
       this.state.message = `Fragmento ${index + 1} preparado.`;
       this._publish();
       return autoplay ? this._requestPlay(token) : true;
@@ -401,6 +417,11 @@ export class PlaybackController {
     this.state.status = "generating";
     this.state.generationProgress = null;
     this.state.generationPhase = "synthesis";
+    this.state.generationStage = "request-started";
+    this.state.generationStartedAt = Date.now();
+    this.state.generationRequestId = null;
+    this.state.generationVoiceId = voice;
+    this.state.generationTextLength = text.length;
     this.state.generationCompletedParts = null;
     this.state.generationTotalParts = null;
     this.state.currentTime = 0;
@@ -421,6 +442,10 @@ export class PlaybackController {
           ? event.loaded / event.total * 100
           : null;
       this.state.generationPhase = phase;
+      this.state.generationStage = String(event.stage || "");
+      this.state.generationRequestId = event.requestId ?? this.state.generationRequestId;
+      this.state.generationVoiceId = event.voiceId || this.state.generationVoiceId;
+      this.state.generationTextLength = Number.isFinite(event.textLength) ? event.textLength : this.state.generationTextLength;
       this.state.generationProgress = rawProgress === null
         ? null
         : Math.max(0, Math.min(1, rawProgress / 100));
@@ -435,10 +460,7 @@ export class PlaybackController {
       this._activateBlob(result, { kind: "preview", filename, voice });
       this.state.synthesisStatus = "idle";
       this.state.status = "audio-ready";
-      this.state.generationProgress = null;
-      this.state.generationPhase = "";
-      this.state.generationCompletedParts = null;
-      this.state.generationTotalParts = null;
+      this._resetGeneration();
       this.state.message = "Muestra preparada.";
       this._publish();
       return this._requestPlay(token);
@@ -529,10 +551,7 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[0] ?? null;
     this.state.synthesisStatus = "idle";
-    this.state.generationProgress = null;
-    this.state.generationPhase = "";
-    this.state.generationCompletedParts = null;
-    this.state.generationTotalParts = null;
+    this._resetGeneration();
     this.state.status = this.state.chunks.length ? "stopped" : "empty";
     this.state.message = this.state.chunks.length ? "Lectura detenida. La próxima reproducción empieza desde el principio." : "Pega o carga texto para empezar.";
     this.restartOnPlay = false;
@@ -553,10 +572,7 @@ export class PlaybackController {
     this.state.currentTime = 0;
     this.state.duration = this.state.durations[target] ?? null;
     this.state.synthesisStatus = "idle";
-    this.state.generationProgress = null;
-    this.state.generationPhase = "";
-    this.state.generationCompletedParts = null;
-    this.state.generationTotalParts = null;
+    this._resetGeneration();
     this.pendingResumePosition = 0;
     this.state.status = "text-ready";
     this.state.message = `Seleccionado el fragmento ${target + 1} de ${this.state.chunks.length}.`;

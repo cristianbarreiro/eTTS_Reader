@@ -82,8 +82,8 @@ async function ensureOffscreenDocument() {
   if (!creatingOffscreen) {
     creatingOffscreen = chrome.offscreen.createDocument({
       url: OFFSCREEN_PATH,
-      reasons: ["AUDIO_PLAYBACK"],
-      justification: "Mantener la reproducción local y su cola mientras el usuario oculta el panel lateral."
+      reasons: ["AUDIO_PLAYBACK", "WORKERS"],
+      justification: "Mantener la reproducción local y los workers de inferencia de voz activos mientras el usuario oculta el panel lateral."
     }).finally(() => { creatingOffscreen = null; });
   }
   await creatingOffscreen;
@@ -835,7 +835,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const needsContext = [
       "start", "preview", "initialize", "restore", "piper-catalog", "piper-model-status",
-      "prepare-audio", "list-installed-piper-models", "install-piper-model", "delete-piper-model", "reset-piper-engine", "clear-audio-cache", "voice-preparation-status"
+      "prepare-audio", "prepare-queue-audio", "list-installed-piper-models", "install-piper-model", "delete-piper-model", "reset-piper-engine", "clear-audio-cache", "voice-preparation-status"
     ].includes(message.command);
     return sendOffscreen(message.command, message.payload || {}, { create: needsContext });
   };

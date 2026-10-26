@@ -26,3 +26,23 @@ test("stack serialization is bounded and plain errors remain readable", () => {
   assert.match(serialized.stack, /truncado/);
   assert.equal(formatErrorDiagnostics(new Error("plain failure")), "plain failure");
 });
+
+test("synthesis diagnostics keep safe request metadata without including user text", () => {
+  const error = Object.assign(new Error("Synthesis timed out"), {
+    code: "KOKORO_SYNTHESIS_TIMEOUT",
+    phase: "model-generate",
+    requestId: 12,
+    voiceId: "af_heart",
+    textLength: 180,
+    elapsedMs: 301_200,
+    timeoutKind: "inactivity"
+  });
+  const serialized = serializeErrorDiagnostics(error);
+  const displayed = formatErrorDiagnostics({ diagnostics: serialized });
+  assert.equal(serialized.requestId, "12");
+  assert.equal(serialized.voiceId, "af_heart");
+  assert.equal(serialized.textLength, 180);
+  assert.match(displayed, /model-generate/);
+  assert.match(displayed, /solicitud 12 · voz af_heart · 180 caracteres · 301 s transcurridos · límite inactivity/);
+  assert.doesNotMatch(displayed, /Synthesis timed out.*Hello/);
+});

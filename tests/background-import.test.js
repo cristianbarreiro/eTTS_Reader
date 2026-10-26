@@ -102,6 +102,8 @@ test("queue preparation and recovery create the persistent offscreen engine when
     await harness.send({ target: "background", command: "replace", payload: { session } });
     assert.equal(harness.calls.offscreenCreates.length, 1);
     assert.equal(harness.calls.offscreenCreates[0].url, "offscreen.html");
+    assert.deepEqual(harness.calls.offscreenCreates[0].reasons, ["AUDIO_PLAYBACK", "WORKERS"]);
+    assert.match(harness.calls.offscreenCreates[0].justification, /workers de inferencia/i);
 
     harness.api.offscreen.closeDocument();
     await harness.send({ target: "background", command: "restore", payload: { session } });

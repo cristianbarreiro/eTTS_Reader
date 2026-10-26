@@ -33,6 +33,19 @@ test("restored active work is reported as interrupted and keeps its saved positi
   assert.equal(snapshot.pendingChunkIndices.length, 0);
 });
 
+test("ReaderClient exposes a live synthesis elapsed time without persisting a polling counter", () => {
+  const client = new ReaderClient({ runtime: fakeRuntime() });
+  client.state = {
+    chunks: ["Read."], chunkStates: ["generating"], durations: [null],
+    status: "generating", generationStartedAt: Date.now() - 2_000
+  };
+  const first = client.snapshot().generationElapsedMs;
+  const second = client.snapshot().generationElapsedMs;
+  assert.ok(first >= 2_000);
+  assert.ok(second >= first);
+  client.dispose();
+});
+
 test("reopening reconnects to an active audio session without issuing another play", async () => {
   const runtime = fakeRuntime(async ({ command }) => command === "restore" ? {
     ok: true,
@@ -80,6 +93,89 @@ test("preparing a loaded queue sends a dedicated non-play command", async () => 
     ["prepare-audio", "session-prepare"]
   ]);
   assert.equal(client.snapshot().status, "generating");
+  client.dispose();
+});
+
+test("queue candidate progress is visible while the prior queue remains active until the first WAV is accepted", async () => {
+  let runtime;
+  runtime = fakeRuntime(async ({ command, payload }) => {
+    if (command === "prepare-queue-audio") {
+      runtime.onMessage.emit({
+        target: "panel", type: "reader:queue-audio-preparation", operationId: payload.operationId,
+        sessionId: payload.session.id, state: "generating",
+        message: "Inferencia Kokoro local en curso…",
+        event: { phase: "synthesis", stage: "model-generate", partIndex: 1, totalParts: 3, completedParts: 0, textLength: 15 }
+      });
+      queueMicrotask(() => runtime.onMessage.emit({
+        target: "panel", type: "reader:queue-audio-preparation", operationId: payload.operationId,
+        sessionId: payload.session.id, state: "ready",
+        audioKey: "first-wav", voiceId: "af_heart", textLength: 15
+      }));
+      return {
+        ok: true, sessionId: "previous-session",
+        snapshot: { chunks: ["Old text."], status: "text-ready", selectedIndex: 0, speed: 1, durations: [null], activeKind: "chunk" }
+      };
+    }
+    return { ok: true };
+  });
+  const updates = [];
+  const client = new ReaderClient({ runtime, onState: (state) => updates.push(state) });
+  const previous = { id: "previous-session", chunks: ["Old text."], sourceText: "Old text.", queuePrepared: true, voice: "af_heart" };
+  const candidate = { id: "candidate-session", chunks: ["New text for reading."], sourceText: "New text for reading.", queuePrepared: true, voice: "af_heart" };
+  client.setSession(previous);
+
+  const preparing = client.prepareQueueAudio(candidate, "candidate-op");
+  assert.equal(client.session.id, previous.id);
+  assert.deepEqual(client.snapshot().chunks, candidate.chunks);
+  const result = await preparing;
+
+  assert.ok(updates.some((state) => state.generationStage === "model-generate" && state.generationProgress === null),
+    "the UI receives an indeterminate generation state while Kokoro model.generate() runs");
+  assert.equal(result.audioKey, "first-wav");
+  assert.equal(client.session.id, previous.id, "the client queue stays on the previous session until commit");
+  assert.equal(client.snapshot().queuePreparation, true);
+  assert.equal(client.snapshot().generationStage, "first-wav-ready");
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["prepare-queue-audio"]);
+  client.setSession({ ...candidate, audioKeys: [result.audioKey], chunkStates: ["ready"] });
+  assert.equal(client.snapshot().queuePreparation, undefined);
+  assert.equal(client.session.id, candidate.id);
+  client.dispose();
+});
+
+test("queue preparation errors restore the prior snapshot, and lost terminal events have a deadline", async () => {
+  const prior = { id: "previous-session", chunks: ["Old text."], sourceText: "Old text.", queuePrepared: true, voice: "af_heart" };
+  const candidate = { id: "candidate-session", chunks: ["New text."], sourceText: "New text.", queuePrepared: true, voice: "af_heart" };
+  let runtime;
+  runtime = fakeRuntime(async ({ command, payload }) => {
+    if (command === "prepare-queue-audio") {
+      queueMicrotask(() => runtime.onMessage.emit({
+        target: "panel", type: "reader:queue-audio-preparation", operationId: payload.operationId,
+        sessionId: payload.session.id, state: "error", message: "Kokoro synthesis timed out.",
+        code: "KOKORO_SYNTHESIS_TIMEOUT", phase: "model-generate"
+      }));
+      return { ok: true, sessionId: prior.id, snapshot: { chunks: prior.chunks, status: "text-ready", selectedIndex: 0, speed: 1, durations: [null] } };
+    }
+    return { ok: true };
+  });
+  const client = new ReaderClient({ runtime, timeouts: { queuePreparationMs: 50 } });
+  client.setSession(prior);
+  await assert.rejects(client.prepareQueueAudio(candidate, "error-op"), (error) => {
+    assert.equal(error.code, "KOKORO_SYNTHESIS_TIMEOUT");
+    assert.equal(error.phase, "model-generate");
+    return true;
+  });
+  assert.equal(client.session.id, prior.id);
+  assert.deepEqual(client.snapshot().chunks, prior.chunks);
+  assert.equal(client.snapshot().queuePreparation, undefined);
+
+  runtime = fakeRuntime(async () => ({ ok: true, sessionId: prior.id, snapshot: { chunks: prior.chunks, status: "text-ready", selectedIndex: 0, speed: 1, durations: [null] } }));
+  const timedClient = new ReaderClient({ runtime, timeouts: { queuePreparationMs: 10 } });
+  timedClient.setSession(prior);
+  await assert.rejects(timedClient.prepareQueueAudio(candidate, "lost-event-op"), (error) => error.code === "READER_QUEUE_PREPARATION_TIMEOUT");
+  assert.equal(timedClient.session.id, prior.id);
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["prepare-queue-audio", "cancel-queue-audio-preparation"]);
+  assert.equal(timedClient.snapshot().queuePreparation, undefined);
+  timedClient.dispose();
   client.dispose();
 });
 
@@ -197,6 +293,30 @@ test("Kokoro synthesis refuses to initialize implicitly and requires a prepared 
   assert.equal(client.preparationStatus().state, "idle");
 });
 
+test("Kokoro worker errors reject the matching request with safe synthesis metadata", async () => {
+  const client = new KokoroWorkerClient({ workerFactory: () => ({
+    postMessage(message) {
+      const data = message.type === "initialize"
+        ? { id: message.id, type: "result", value: { voices: ["af_heart"] } }
+        : { id: message.id, type: "error", code: "KOKORO_SYNTHESIS_FAILED", message: "ONNX failed", phase: "model-generate" };
+      queueMicrotask(() => this.onmessage({ data }));
+    },
+    terminate() {}
+  }) });
+
+  await client.initialize();
+  await assert.rejects(client.synthesize("Hello there.", "af_heart"), (error) => {
+    assert.equal(error.code, "KOKORO_SYNTHESIS_FAILED");
+    assert.equal(error.phase, "model-generate");
+    assert.equal(error.requestId, 2);
+    assert.equal(error.voiceId, "af_heart");
+    assert.equal(error.textLength, 12);
+    assert.ok(Number.isFinite(error.elapsedMs));
+    return true;
+  });
+  await client.dispose();
+});
+
 test("Kokoro timeout terminates a stuck worker and permits a clean preparation retry", async () => {
   const workers = [];
   const client = new KokoroWorkerClient({
@@ -227,14 +347,20 @@ test("Kokoro timeout terminates a stuck worker and permits a clean preparation r
   await client.dispose();
 });
 
-test("Kokoro synthesis timeout releases the worker and permits a new synthesis after preparation", async () => {
+test("Kokoro synthesis timeout rejects every pending operation and permits a clean retry", async () => {
   const workers = [];
+  const progressEvents = [];
   const client = new KokoroWorkerClient({
     timeouts: { initializeIdleMs: 100, initializeMaxMs: 200, synthesisIdleMs: 25, synthesisMinMs: 60, synthesisMaxMs: 100 },
     workerFactory: () => {
       const worker = {
         postMessage(message) {
           if (message.type === "initialize") queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: { voices: ["af_heart"] } } }));
+          if (message.type === "synthesize" && workers.length === 1) {
+            queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "progress", event: {
+              phase: "synthesis", stage: "model-generate", progress: null
+            } } }));
+          }
           if (message.type === "synthesize" && workers.length > 1) queueMicrotask(() => this.onmessage({ data: { id: message.id, type: "result", value: new Blob(["audio"]) } }));
         },
         terminate() { this.terminated = true; }
@@ -245,9 +371,27 @@ test("Kokoro synthesis timeout releases the worker and permits a new synthesis a
   });
 
   await client.initialize();
-  await assert.rejects(client.synthesize("Hello.", "af_heart"), (error) => error.code === "KOKORO_SYNTHESIS_TIMEOUT" && error.phase === "synthesis");
+  const firstAttempt = client.synthesize("Hello.", "af_heart", (event) => progressEvents.push(event));
+  const secondAttempt = client.synthesize("Another request.", "af_heart", (event) => progressEvents.push(event));
+  const lateMessageHandler = workers[0].onmessage;
+  await assert.rejects(firstAttempt, (error) => error.code === "KOKORO_SYNTHESIS_TIMEOUT"
+    && error.phase === "model-generate" && error.requestId === 2 && error.voiceId === "af_heart"
+    && error.textLength === 6 && error.elapsedMs >= 0 && error.timeoutKind === "inactivity");
+  await assert.rejects(secondAttempt, (error) => error.code === "KOKORO_WORKER_RESET"
+    && error.phase === "model-generate" && error.requestId === 3
+    && error.resetByRequestId === 2 && error.voiceId === "af_heart"
+    && error.textLength === 16 && error.elapsedMs >= 0);
+  assert.ok(progressEvents.some((event) => event.stage === "model-generate"
+    && event.requestId === 2 && event.voiceId === "af_heart" && event.textLength === 6
+    && Number.isFinite(event.elapsedMs)), "worker progress must reach the reader with safe request metadata");
   assert.equal(workers[0].terminated, true);
   assert.equal(client.preparationStatus().state, "error");
+  assert.equal(client.pending.size, 0);
+  const progressCountAfterTimeout = progressEvents.length;
+  lateMessageHandler({ data: { id: 2, type: "progress", event: { stage: "wav-created", progress: 100 } } });
+  lateMessageHandler({ data: { id: 2, type: "result", value: new Blob(["stale"]) } });
+  lateMessageHandler({ data: { id: 3, type: "result", value: new Blob(["stale second request"]) } });
+  assert.equal(progressEvents.length, progressCountAfterTimeout, "messages from a terminated worker must not revive the operation");
   await client.initialize();
   assert.equal((await client.synthesize("Hello again.", "af_heart")).size, 5);
   assert.equal(workers.length, 2);

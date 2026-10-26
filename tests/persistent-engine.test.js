@@ -198,6 +198,76 @@ test("loading a prepared queue persists it without synthesizing or starting audi
   assert.deepEqual(calls, []);
 });
 
+test("queue replacement waits for a valid first WAV and preserves the previous session until commit", async () => {
+  const repository = new MemoryRepository();
+  const calls = [];
+  const published = [];
+  const { audio, engine } = makeEngine(repository, calls, (message) => published.push(message));
+  const previous = { ...session(), id: "previous-session", queuePrepared: true, audioKeys: [] };
+  const candidate = {
+    ...session(), id: "candidate-session", sourceText: "Candidate text.", chunks: ["Candidate text."],
+    queuePrepared: true, voice: "af_heart", audioKeys: []
+  };
+  await engine.handleCommand({ command: "restore", session: previous });
+  await repository.saveSession(previous);
+
+  await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "candidate-op" });
+  assert.equal(engine.activeSession.id, previous.id, "candidate synthesis must not replace the active queue");
+  assert.ok(repository.sessions.has(previous.id));
+  assert.equal(repository.sessions.has(candidate.id), false, "the candidate is not persisted as a session before its first WAV succeeds");
+  assert.equal(audio.playCount, 0);
+
+  await waitFor(() => published.some((message) => message.type === "reader:queue-audio-preparation" && message.state === "ready"));
+  const result = published.find((message) => message.type === "reader:queue-audio-preparation" && message.state === "ready");
+  assert.equal(engine.activeSession.id, previous.id);
+  assert.equal(result.audioKey, [...repository.audio.keys()][0]);
+  assert.equal(repository.audio.size, 1);
+  assert.ok(repository.audio.get(result.audioKey).blob.size > 0);
+  assert.equal(audio.playCount, 0, "preparing the first audio must not autoplay");
+  assert.equal(JSON.stringify(published).includes("Candidate text."), false, "progress messages must never expose the source text");
+
+  const committed = {
+    ...candidate,
+    audioKeys: [result.audioKey],
+    chunkStates: ["ready"]
+  };
+  await engine.handleCommand({ command: "replace", session: committed });
+  assert.equal(engine.activeSession.id, candidate.id);
+  assert.deepEqual(engine.activeSession.audioKeys, [result.audioKey]);
+  assert.equal(audio.playCount, 0);
+});
+
+test("an invalid first WAV fails candidate preparation without caching it or replacing the previous queue", async () => {
+  const repository = new MemoryRepository();
+  const published = [];
+  const previous = { ...session(), id: "previous-session", queuePrepared: true, audioKeys: [] };
+  const candidate = {
+    ...session(), id: "candidate-session", sourceText: "Invalid candidate.", chunks: ["Invalid candidate."],
+    queuePrepared: true, voice: "af_heart", audioKeys: []
+  };
+  const audio = new MockAudio();
+  const engine = new PersistentReaderEngine({
+    audio, repository, publish: (message) => published.push(message),
+    inference: {
+      async synthesize() { return new Blob([], { type: "audio/wav" }); },
+      preparationStatus() { return { state: "ready" }; },
+      async dispose() {}
+    }
+  });
+  await repository.saveSession(previous);
+  await engine.handleCommand({ command: "restore", session: previous });
+
+  await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "invalid-op" });
+  await waitFor(() => published.some((message) => message.type === "reader:queue-audio-preparation" && message.state === "error"));
+  const failure = published.find((message) => message.type === "reader:queue-audio-preparation" && message.state === "error");
+  assert.match(failure.message, /WAV|audio|válido/i);
+  assert.equal(engine.activeSession.id, previous.id);
+  assert.equal(repository.sessions.has(candidate.id), false);
+  assert.equal(repository.sessions.has(previous.id), true);
+  assert.equal(repository.audio.size, 0, "empty/invalid output must never enter the audio cache");
+  assert.equal(audio.playCount, 0);
+});
+
 test("prepare-audio synthesizes the first fragment in the offscreen engine without starting playback", async () => {
   const repository = new MemoryRepository();
   const calls = [];

@@ -68,21 +68,30 @@ export async function synthesizeKokoroText(model, text, {
   if (!chunks.length) throw new Error("No hay texto para sintetizar con Kokoro.");
   const generated = [];
 
+  try {
+    onProgress({ phase: "synthesis", stage: "split-text", textLength: String(text).length, completedParts: 0, totalParts: chunks.length, progress: null });
+  } catch { /* Progress is advisory. */ }
+
   for (let index = 0; index < chunks.length; index++) {
+    const partStartedAt = Date.now();
     try {
       onProgress({
         phase: "synthesis",
-        stage: "synthesizing-part",
+        stage: "model-generate",
+        partIndex: index + 1,
+        partLength: chunks[index].length,
         completedParts: index,
         totalParts: chunks.length,
-        progress: Math.round(index / chunks.length * 100)
+        progress: null
       });
     } catch { /* Progress is advisory. */ }
     generated.push(await model.generate(chunks[index], { voice, speed }));
     try {
       onProgress({
         phase: "synthesis",
-        stage: "synthesizing-part",
+        stage: "part-complete",
+        partIndex: index + 1,
+        partDurationMs: Math.max(0, Date.now() - partStartedAt),
         completedParts: index + 1,
         totalParts: chunks.length,
         progress: Math.round((index + 1) / chunks.length * 100)
@@ -90,6 +99,16 @@ export async function synthesizeKokoroText(model, text, {
     } catch { /* Progress is advisory. */ }
   }
 
+  try {
+    onProgress({ phase: "synthesis", stage: "assemble-audio", completedParts: chunks.length, totalParts: chunks.length, progress: null });
+  } catch { /* Progress is advisory. */ }
   const merged = concatenateKokoroAudio(generated);
-  return new RawAudio(merged.audio, merged.sampleRate).toBlob();
+  try {
+    onProgress({ phase: "synthesis", stage: "wav-conversion", completedParts: chunks.length, totalParts: chunks.length, progress: null });
+  } catch { /* Progress is advisory. */ }
+  const blob = await new RawAudio(merged.audio, merged.sampleRate).toBlob();
+  try {
+    onProgress({ phase: "synthesis", stage: "wav-created", completedParts: chunks.length, totalParts: chunks.length, progress: 100 });
+  } catch { /* Progress is advisory. */ }
+  return blob;
 }

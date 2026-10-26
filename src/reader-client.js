@@ -7,7 +7,8 @@ export const READER_COMMAND_TIMEOUTS = Object.freeze({
   piperInstallMs: 11 * 60_000,
   piperInitializeMs: 220_000,
   kokoroInitializeMs: 21 * 60_000,
-  previewMs: 5 * 60_000
+  previewMs: 5 * 60_000,
+  queuePreparationMs: 31 * 60_000
 });
 
 function timeoutForCommand(command, payload, timeouts) {
@@ -67,6 +68,8 @@ export class ReaderClient {
     this.clearTimer = clearTimer.bind(globalThis);
     this.session = null;
     this.state = snapshotFromSession();
+    this.queuePreparation = null;
+    this.queuePreparationWaiters = new Map();
     this.listener = (message) => {
       if (message?.target !== "panel") return;
       if (message.type === "reader:state") {
@@ -75,6 +78,8 @@ export class ReaderClient {
         this.onState(this.snapshot());
       } else if (message.type === "reader:model" || message.type === "reader:model-progress") {
         this.onModel(message);
+      } else if (message.type === "reader:queue-audio-preparation") {
+        this._handleQueueAudioPreparation(message);
       } else if (message.type === "reader:error") {
         this.onModel({ type: "reader:model", state: "error", message: message.message, diagnostics: message.diagnostics, code: message.code, phase: message.phase });
       }
@@ -83,15 +88,58 @@ export class ReaderClient {
   }
 
   snapshot() {
-    return {
+    const snapshot = {
       ...this.state,
+      generationElapsedMs: this.state.status === "generating" && Number.isFinite(this.state.generationStartedAt)
+        ? Math.max(0, Date.now() - this.state.generationStartedAt) : null,
       chunks: [...this.state.chunks],
       chunkStates: [...(this.state.chunkStates || [])],
       durations: [...this.state.durations]
     };
+    const preparation = this.queuePreparation;
+    if (!preparation) return snapshot;
+    const { session, event = {} } = preparation;
+    const ready = preparation.state === "ready";
+    const progress = Number.isFinite(event.progress)
+      ? Math.max(0, Math.min(1, event.progress / 100))
+      : ready ? 1 : null;
+    const durations = Array.isArray(session.durations) ? [...session.durations] : session.chunks.map(() => null);
+    return {
+      ...snapshot,
+      chunks: [...session.chunks],
+      status: "generating",
+      synthesisStatus: "generating",
+      selectedIndex: 0,
+      playingIndex: null,
+      pendingChunkIndices: session.chunks.slice(1).map((_, index) => index + 1),
+      durations,
+      currentTime: 0,
+      duration: durations[0] ?? null,
+      speed: Number(session.speed) || 1,
+      generationProgress: progress,
+      generationPhase: event.phase || "synthesis",
+      generationStage: ready ? "first-wav-ready" : event.stage || "request-started",
+      generationStartedAt: preparation.startedAt,
+      generationElapsedMs: Math.max(0, Date.now() - preparation.startedAt),
+      generationRequestId: event.requestId ?? null,
+      generationVoiceId: session.voice || session.voiceId || null,
+      generationTextLength: Number.isFinite(event.textLength) ? event.textLength : String(session.chunks[0] || "").length,
+      generationCompletedParts: Number.isInteger(event.completedParts) ? event.completedParts : null,
+      generationTotalParts: Number.isInteger(event.totalParts) ? event.totalParts : null,
+      activeKind: "chunk",
+      activeProvider: preparation.provider || snapshot.activeProvider,
+      activeVoiceId: session.voice || session.voiceId || null,
+      hasDownloadableAudio: false,
+      currentAudioKey: null,
+      downloadUrl: null,
+      downloadFilename: null,
+      message: preparation.message || "Preparando el primer audio local…",
+      queuePreparation: true
+    };
   }
 
   setSession(session) {
+    this.queuePreparation = null;
     this.session = session ? { ...session } : null;
     this.state = snapshotFromSession(session);
     this.onState(this.snapshot());
@@ -151,6 +199,96 @@ export class ReaderClient {
     return this.request("replace", { session });
   }
 
+  prepareQueueAudio(session, operationId) {
+    if (!session?.id || !operationId) throw new TypeError("Se requiere una cola y un identificador de preparación.");
+    if (this.queuePreparationWaiters.has(operationId)) throw new Error("Esta cola ya se está preparando.");
+    let timeoutId;
+    let rejectCompletion;
+    const completion = new Promise((resolve, reject) => {
+      rejectCompletion = reject;
+      this.queuePreparationWaiters.set(operationId, { resolve, reject });
+    });
+    timeoutId = this.setTimer(() => {
+      const timeout = new Error("La preparación del primer audio no terminó dentro del límite. La cola anterior se conserva; puedes reintentar.");
+      timeout.name = "ReaderQueuePreparationTimeoutError";
+      timeout.code = "READER_QUEUE_PREPARATION_TIMEOUT";
+      timeout.phase = "queue-preparation";
+      void Promise.resolve(this.runtime.sendMessage({ target: "background", command: "cancel-queue-audio-preparation", payload: { operationId } })).catch(() => {});
+      rejectCompletion(timeout);
+    }, this.timeouts.queuePreparationMs);
+    this.queuePreparation = {
+      operationId,
+      session: { ...session, chunks: [...session.chunks] },
+      state: "generating",
+      provider: getVoiceProvider(session.voice || session.voiceId),
+      event: { phase: "synthesis", stage: "request-started", textLength: String(session.chunks[0] || "").length },
+      startedAt: Date.now(),
+      message: "Preparando el primer audio local…"
+    };
+    this.onState(this.snapshot());
+
+    const start = this.request("prepare-queue-audio", { session, operationId });
+    return Promise.all([start, completion]).then(([, result]) => result).catch((error) => {
+      const waiter = this.queuePreparationWaiters.get(operationId);
+      this.queuePreparationWaiters.delete(operationId);
+      if (waiter) waiter.reject(error);
+      if (this.queuePreparation?.operationId === operationId) {
+        this.queuePreparation = null;
+        this.onState(this.snapshot());
+      }
+      throw error;
+    }).finally(() => this.clearTimer(timeoutId));
+  }
+
+  cancelQueueAudioPreparation(operationId) {
+    if (this.queuePreparation?.operationId === operationId) {
+      this.queuePreparation = null;
+      this.onState(this.snapshot());
+    }
+    const waiter = this.queuePreparationWaiters.get(operationId);
+    this.queuePreparationWaiters.delete(operationId);
+    if (waiter) {
+      const error = new Error("La preparación de audio se canceló; la cola anterior sigue intacta.");
+      error.code = "QUEUE_PREPARATION_CANCELLED";
+      error.phase = "queue-preparation";
+      waiter.reject(error);
+    }
+    return Promise.resolve(this.runtime.sendMessage({ target: "background", command: "cancel-queue-audio-preparation", payload: { operationId } }));
+  }
+
+  _handleQueueAudioPreparation(message) {
+    const preparation = this.queuePreparation;
+    if (!preparation || message.operationId !== preparation.operationId || message.sessionId !== preparation.session.id) return;
+    if (message.state === "generating") {
+      preparation.event = message.event || preparation.event;
+      preparation.message = message.message || preparation.message;
+      this.onState(this.snapshot());
+      return;
+    }
+    const waiter = this.queuePreparationWaiters.get(message.operationId);
+    this.queuePreparationWaiters.delete(message.operationId);
+    if (message.state === "ready") {
+      preparation.state = "ready";
+      preparation.audioKey = message.audioKey;
+      preparation.message = "Primer audio generado, validado y guardado. Aplicando la cola…";
+      preparation.event = { phase: "synthesis", stage: "first-wav-ready", progress: 100, textLength: message.textLength };
+      this.onState(this.snapshot());
+      waiter?.resolve(message);
+      return;
+    }
+    this.queuePreparation = null;
+    this.onState(this.snapshot());
+    const error = new Error(message.message || (message.state === "cancelled" ? "Se canceló la preparación de audio." : "No se pudo preparar el primer audio local."));
+    if (message.code) error.code = message.code;
+    if (message.phase) error.phase = message.phase;
+    if (message.requestId != null) error.requestId = message.requestId;
+    if (message.voiceId) error.voiceId = message.voiceId;
+    if (Number.isFinite(message.textLength)) error.textLength = message.textLength;
+    if (Number.isFinite(message.elapsedMs)) error.elapsedMs = message.elapsedMs;
+    if (message.diagnostics) error.diagnostics = message.diagnostics;
+    waiter?.reject(error);
+  }
+
   prepareAudio(sessionId = this.session?.id) {
     return this.request("prepare-audio", { sessionId });
   }
@@ -195,7 +333,13 @@ export class ReaderClient {
     if (response?.ok === false) throw new Error(response.error || "No se pudo detener el trabajo de la sesión.");
     return response || { ok: true };
   }
-  dispose() { this.runtime.onMessage.removeListener(this.listener); }
+  dispose() {
+    this.runtime.onMessage.removeListener(this.listener);
+    if (this.queuePreparation?.operationId) void this.cancelQueueAudioPreparation(this.queuePreparation.operationId).catch(() => {});
+    for (const waiter of this.queuePreparationWaiters.values()) waiter.reject(new Error("Se cerró el panel durante la preparación de audio."));
+    this.queuePreparationWaiters.clear();
+    this.queuePreparation = null;
+  }
 }
 
 export { snapshotFromSession };

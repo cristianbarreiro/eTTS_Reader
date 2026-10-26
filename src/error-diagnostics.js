@@ -18,6 +18,12 @@ export function serializeErrorDiagnostics(error, depth = 0) {
   for (const key of ["code", "phase"]) {
     if (source[key] != null) details[key] = boundedString(source[key], 160);
   }
+  for (const key of ["requestId", "resetByRequestId", "voiceId", "timeoutKind", "operation"]) {
+    if (source[key] != null) details[key] = boundedString(source[key], 160);
+  }
+  for (const key of ["textLength", "elapsedMs"]) {
+    if (Number.isFinite(source[key]) && source[key] >= 0) details[key] = source[key];
+  }
   if (source.filename) details.filename = boundedString(source.filename, 500);
   if (Number.isFinite(source.lineno)) details.lineno = source.lineno;
   if (Number.isFinite(source.colno)) details.colno = source.colno;
@@ -34,6 +40,15 @@ function appendDiagnostic(lines, details, label = "") {
   if (details.name || details.message) lines.push(prefix + [details.name, details.message].filter(Boolean).join(": "));
   if (details.code) lines.push("Código: " + details.code);
   if (details.phase) lines.push("Fase: " + details.phase);
+  const context = [
+    details.requestId && `solicitud ${details.requestId}`,
+    details.resetByRequestId && `worker reiniciado por solicitud ${details.resetByRequestId}`,
+    details.voiceId && `voz ${details.voiceId}`,
+    Number.isFinite(details.textLength) && `${details.textLength} caracteres`,
+    Number.isFinite(details.elapsedMs) && `${Math.round(details.elapsedMs / 1000)} s transcurridos`,
+    details.timeoutKind && `límite ${details.timeoutKind}`
+  ].filter(Boolean);
+  if (context.length) lines.push("Contexto: " + context.join(" · "));
   if (details.filename) {
     const location = [details.filename, details.lineno, details.colno].filter((part) => part != null && part !== "").join(":");
     lines.push("Ubicación: " + location);

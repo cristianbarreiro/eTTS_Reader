@@ -34,19 +34,50 @@ export function readingDurationSummary(snapshot, activeProvider = snapshot.activ
 
 export function readingProgressCaption(snapshot) {
   if (snapshot.status === "generating") {
+    const elapsed = Number.isFinite(snapshot.generationElapsedMs)
+      ? formatTime(Math.floor(snapshot.generationElapsedMs / 1000)) : "";
+    const elapsedSuffix = elapsed ? ` · ${elapsed} transcurridos` : "";
+    if (snapshot.generationStage === "model-generate") {
+      const part = Number.isInteger(snapshot.generationTotalParts) && snapshot.generationTotalParts > 1
+        ? ` · parte ${Math.max(1, Number(snapshot.generationCompletedParts) + 1)}/${snapshot.generationTotalParts}` : "";
+      return `Inferencia Kokoro${part}${elapsedSuffix}`;
+    }
+    if (snapshot.generationStage === "part-complete") {
+      const completed = Math.max(0, Number(snapshot.generationCompletedParts) || 0);
+      const total = Math.max(1, Number(snapshot.generationTotalParts) || 1);
+      const progress = Number.isFinite(snapshot.generationProgress)
+        ? Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100) : Math.round(completed / total * 100);
+      return `Partes procesadas · ${completed}/${total} · ${progress}%${elapsedSuffix}`;
+    }
+    if (["assemble-audio", "wav-conversion", "wav-created", "validating-wav", "saving-cache", "audio-cached", "invalid-cached-wav", "first-wav-ready"].includes(snapshot.generationStage)) {
+      const labels = {
+        "assemble-audio": "Ensamblando audio",
+        "wav-conversion": "Convirtiendo a WAV",
+        "wav-created": "WAV generado · validando",
+        "validating-wav": "Validando WAV",
+        "saving-cache": "Guardando audio local",
+        "audio-cached": "Audio guardado localmente",
+        "invalid-cached-wav": "Audio guardado inválido · regenerando",
+        "first-wav-ready": "Primer WAV validado · aplicando cola"
+      };
+      return `${labels[snapshot.generationStage]}${elapsedSuffix}`;
+    }
     if (Number.isInteger(snapshot.generationTotalParts) && snapshot.generationTotalParts > 1) {
       const completed = Math.max(0, Math.min(snapshot.generationTotalParts, Number(snapshot.generationCompletedParts) || 0));
-      const progress = Number.isFinite(snapshot.generationProgress)
-        ? Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100) : 0;
-      return completed >= snapshot.generationTotalParts
-        ? `Ensamblando el WAV · ${progress}%`
-        : `Generando audio · parte ${completed + 1}/${snapshot.generationTotalParts} · ${progress}%`;
+      if (Number.isFinite(snapshot.generationProgress)) {
+        const progress = Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100);
+        return completed >= snapshot.generationTotalParts
+          ? `Ensamblando el WAV · ${progress}%${elapsedSuffix}`
+          : `Partes procesadas · ${completed}/${snapshot.generationTotalParts} · ${progress}%${elapsedSuffix}`;
+      }
+      return `Generando audio · parte ${completed + 1}/${snapshot.generationTotalParts}${elapsedSuffix}`;
     }
     if (Number.isFinite(snapshot.generationProgress)) {
       const phase = snapshot.generationPhase === "initialize" ? "Preparando voz" : "Generando audio";
-      return `${phase} · ${Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100)}%`;
+      return `${phase} · ${Math.round(Math.max(0, Math.min(1, snapshot.generationProgress)) * 100)}%${elapsedSuffix}`;
     }
-    return snapshot.generationPhase === "initialize" ? "Preparando voz local…" : "Generando audio local…";
+    const phase = snapshot.generationPhase === "initialize" ? "Preparando voz local" : "Generando audio local";
+    return `${phase}${elapsedSuffix}`;
   }
   if (!snapshot.chunks?.length && snapshot.activeKind !== "preview") return "Sin progreso";
   if (snapshot.activeKind === "preview") return "Muestra independiente";

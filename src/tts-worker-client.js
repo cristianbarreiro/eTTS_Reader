@@ -68,12 +68,24 @@ export class KokoroWorkerClient {
         if (typeof event.stage === "string") pending.lastPhase = event.stage;
         else if (typeof event.phase === "string") pending.lastPhase = event.phase;
         if (Number.isFinite(event.progress) || Number.isFinite(event.loaded) || event.stage || event.phase) pending.refreshIdleTimeout();
-        try { pending.onProgress?.(event); } catch { /* UI progress cannot interrupt a worker request. */ }
+        try {
+          pending.onProgress?.({
+            ...event,
+            requestId: data.id,
+            voiceId: event.voiceId || pending.voiceId || undefined,
+            textLength: Number.isFinite(event.textLength) ? event.textLength : pending.textLength,
+            elapsedMs: Math.max(0, Date.now() - pending.startedAt)
+          });
+        } catch { /* UI progress cannot interrupt a worker request. */ }
         return;
       }
       if (data.type === "error") {
         const error = kokoroError(data.code || "KOKORO_WORKER_OPERATION_FAILED", data.message || "Falló la inferencia local.", {
           phase: data.phase || pending.lastPhase || pending.limits.phase,
+          requestId: data.id,
+          voiceId: pending.voiceId,
+          textLength: pending.textLength,
+          elapsedMs: Math.max(0, Date.now() - pending.startedAt),
           diagnostics: data.diagnostics || null
         });
         pending.reject(error);
@@ -114,6 +126,9 @@ export class KokoroWorkerClient {
       };
       const pending = {
         worker, generation, type, onProgress, limits, lastPhase: limits.phase,
+        startedAt: Date.now(),
+        voiceId: String(payload.voice || payload.voiceId || ""),
+        textLength: typeof payload.text === "string" ? payload.text.length : null,
         resolve: (value) => finish(resolve, value),
         reject: (error) => finish(reject, error),
         refreshIdleTimeout: () => {
@@ -125,6 +140,11 @@ export class KokoroWorkerClient {
       this.pending.set(id, pending);
       pending.refreshIdleTimeout();
       if (limits.totalMs) totalTimer = this.setTimer(() => this._timeoutWorker(worker, id, limits, "total"), limits.totalMs);
+      if (type === "synthesize") {
+        try {
+          pending.onProgress?.({ phase: "synthesis", stage: "request-started", requestId: id, voiceId: pending.voiceId, textLength: pending.textLength, elapsedMs: 0 });
+        } catch { /* Progress is advisory. */ }
+      }
       try { worker.postMessage({ id, type, ...payload }); }
       catch (error) { pending.reject(error); }
     });
@@ -136,7 +156,11 @@ export class KokoroWorkerClient {
     const error = kokoroError(limits.code, limits.message, {
       operation: pending.type,
       phase: pending.lastPhase || limits.phase,
-      timeoutKind
+      timeoutKind,
+      requestId,
+      voiceId: pending.voiceId,
+      textLength: pending.textLength,
+      elapsedMs: Math.max(0, Date.now() - pending.startedAt)
     });
     this._invalidateWorker(worker, error, requestId);
   }
@@ -154,7 +178,15 @@ export class KokoroWorkerClient {
       if (pending.worker !== worker) continue;
       const error = id === timedOutRequestId
         ? reason
-        : kokoroError("KOKORO_WORKER_RESET", "El worker Kokoro se reinició porque otra operación dejó de responder. Puedes reintentar.", { phase: pending.lastPhase });
+        : kokoroError("KOKORO_WORKER_RESET", "El worker Kokoro se reinició porque otra operación dejó de responder. Puedes reintentar.", {
+          operation: pending.type,
+          phase: pending.lastPhase,
+          requestId: id,
+          resetByRequestId: timedOutRequestId,
+          voiceId: pending.voiceId,
+          textLength: pending.textLength,
+          elapsedMs: Math.max(0, Date.now() - pending.startedAt)
+        });
       pending.reject(error);
     }
     return true;

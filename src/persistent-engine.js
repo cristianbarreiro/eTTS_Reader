@@ -28,6 +28,7 @@ export class PersistentReaderEngine {
     this.previewAudioKey = null;
     this.previewVoiceId = null;
     this.modelOperationSequence = 0;
+    this.queuePreparations = new Map();
     this.player = new PlaybackController({
       audio,
       synthesize: (text, { voice, onProgress }) => this._queueAudio(text, voice, this.player.snapshot().selectedIndex, onProgress),
@@ -188,19 +189,40 @@ export class PersistentReaderEngine {
         this._publish("reader:error", { message: `No se pudo guardar el estado del fragmento: ${error.message}` });
       });
     }
+    let requestId = null;
+    const reportProgress = (event = {}) => {
+      if (event.requestId != null) requestId = event.requestId;
+      const detail = {
+        ...event,
+        phase: event.phase || "synthesis",
+        provider,
+        voiceId: event.voiceId || voice,
+        textLength: Number.isFinite(event.textLength) ? event.textLength : text.length,
+        ...(event.requestId != null || requestId == null ? {} : { requestId })
+      };
+      try { onProgress(detail); } catch { /* Player progress is observational and cannot interrupt synthesis. */ }
+      this._publish("reader:model-progress", { provider, voiceId: voice, event: detail });
+    };
     const task = this.synthesisTail.then(async () => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió antes de generar el audio.");
       const cached = await this.repository.getAudioChunk(id);
-      if (cached?.blob instanceof Blob && cached.blob.size > 0) return cached.blob;
-      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
-        onProgress: (event) => {
-          try { onProgress(event); } catch { /* Player progress is observational and cannot interrupt synthesis. */ }
-          this._publish("reader:model-progress", { provider, voiceId: voice, event });
+      if (cached?.blob instanceof Blob && cached.blob.size > 0) {
+        try {
+          await validateWavBlob(cached.blob);
+          reportProgress({ stage: "audio-cached", progress: 100 });
+          return cached.blob;
+        } catch {
+          // A previously stored record is not trusted until it passes WAV validation.
+          reportProgress({ stage: "invalid-cached-wav", progress: null });
         }
-      }));
+      }
+      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, { onProgress: reportProgress }));
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la generación del audio.");
+      reportProgress({ stage: "validating-wav", progress: null });
       await validateWavBlob(blob);
+      reportProgress({ stage: "saving-cache", progress: null });
       await this.repository.saveAudioChunk({ id, blob, voice, provider, modelId, modelRevision: voiceRecord.modelRevision || null, providerVersion, text, format: "wav", sampleRate, duration: null });
+      reportProgress({ stage: "audio-cached", progress: 100 });
       return blob;
     }).then(async (blob) => {
       if (generation !== this.sessionGeneration) throw new Error("La sesión cambió durante la preparación del audio.");
@@ -244,6 +266,7 @@ export class PersistentReaderEngine {
   }
 
   _applySession(session, { restore = false } = {}) {
+    this._cancelQueuePreparations("La sesión activa cambió antes de terminar la preparación.");
     this.sessionGeneration++;
     this.activeSession = { ...session, audioKeys: Array.isArray(session.audioKeys) ? [...session.audioKeys] : [] };
     this.previewAudioKey = null;
@@ -273,6 +296,149 @@ export class PersistentReaderEngine {
         : snapshot.activeKind === "preview" ? { ...snapshot, downloadUrl: null } : null,
       currentAudioKey: snapshot.activeKind === "preview" ? this.previewAudioKey : this.activeSession?.audioKeys?.[snapshot.selectedIndex] || null
     };
+  }
+
+  _cancelQueuePreparations(message = "La preparación de la cola se canceló.", exceptId = null) {
+    for (const [operationId, preparation] of this.queuePreparations) {
+      if (operationId === exceptId) continue;
+      preparation.cancelled = true;
+      this._publish("reader:queue-audio-preparation", {
+        operationId,
+        sessionId: preparation.session.id,
+        state: "cancelled",
+        message
+      });
+    }
+  }
+
+  _assertQueuePreparationCurrent(preparation) {
+    if (preparation.cancelled || preparation.generation !== this.sessionGeneration
+        || this.queuePreparations.get(preparation.operationId) !== preparation) {
+      const error = new Error("La preparación de audio quedó obsoleta y no se aplicó a la cola actual.");
+      error.code = "QUEUE_PREPARATION_STALE";
+      error.phase = "queue-commit";
+      throw error;
+    }
+  }
+
+  async _prepareQueueFirstAudio(preparation) {
+    const { session, operationId } = preparation;
+    const text = session.chunks[0];
+    const voice = session.voice || session.voiceId;
+    const voiceRecord = getVoiceRecord(voice);
+    const provider = voiceRecord.provider;
+    const modelId = voiceRecord.modelId;
+    const providerVersion = provider === "kokoro"
+      ? KOKORO_RUNTIME_VERSION
+      : `${PIPER_PROVIDER_VERSION};${voiceRecord.modelRevision}`;
+    const sampleRate = voiceRecord.sampleRate || 24000;
+    const startedAt = this.now();
+    const audioId = await makeAudioCacheKey(text, voice, modelId, provider, providerVersion);
+    this._assertQueuePreparationCurrent(preparation);
+
+    const publishProgress = (event = {}) => {
+      if (preparation.cancelled) return;
+      const safeEvent = {
+        phase: String(event.phase || "synthesis"),
+        ...(typeof event.stage === "string" ? { stage: event.stage } : {}),
+        ...(Number.isFinite(event.progress) ? { progress: event.progress } : {}),
+        ...(Number.isInteger(event.completedParts) ? { completedParts: event.completedParts } : {}),
+        ...(Number.isInteger(event.totalParts) ? { totalParts: event.totalParts } : {}),
+        ...(Number.isInteger(event.partIndex) ? { partIndex: event.partIndex } : {}),
+        ...(Number.isInteger(event.partTotal) ? { partTotal: event.partTotal } : {}),
+        ...(event.requestId != null ? { requestId: event.requestId } : {}),
+        ...(Number.isFinite(event.elapsedMs) ? { elapsedMs: event.elapsedMs } : {}),
+        voiceId: voice,
+        textLength: text.length,
+        sessionId: session.id,
+        operationId,
+        fragmentIndex: 0,
+        fragmentTotal: session.chunks.length,
+        elapsedMs: Math.max(0, this.now() - startedAt)
+      };
+      this._publish("reader:queue-audio-preparation", {
+        operationId,
+        sessionId: session.id,
+        state: "generating",
+        event: safeEvent,
+        message: safeEvent.stage === "model-generate"
+          ? "Inferencia Kokoro local en curso…"
+          : safeEvent.stage === "wav-conversion"
+            ? "Convirtiendo la síntesis a WAV…"
+            : `Preparando el primer audio local · ${safeEvent.stage || safeEvent.phase}…`
+      });
+    };
+
+    const task = this.synthesisTail.then(async () => {
+      this._assertQueuePreparationCurrent(preparation);
+      const cached = await this.repository.getAudioChunk(audioId);
+      if (cached?.blob instanceof Blob && cached.blob.size > 0) {
+        try {
+          await validateWavBlob(cached.blob);
+          this._assertQueuePreparationCurrent(preparation);
+          publishProgress({ phase: "synthesis", stage: "audio-cached", progress: 100 });
+          return cached.blob;
+        } catch (error) {
+          if (preparation.cancelled) throw error;
+          publishProgress({ phase: "synthesis", stage: "invalid-cached-wav", progress: null });
+        }
+      }
+      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
+        onProgress: publishProgress
+      }));
+      this._assertQueuePreparationCurrent(preparation);
+      publishProgress({ phase: "synthesis", stage: "validating-wav", progress: null });
+      await validateWavBlob(blob);
+      this._assertQueuePreparationCurrent(preparation);
+      publishProgress({ phase: "synthesis", stage: "saving-cache", progress: null });
+      await this.repository.saveAudioChunk({
+        id: audioId, blob, voice, provider, modelId,
+        modelRevision: voiceRecord.modelRevision || null,
+        providerVersion, text, format: "wav", sampleRate, duration: null
+      });
+      return blob;
+    });
+    this.synthesisTail = task.catch(() => {});
+
+    try {
+      await task;
+      this._assertQueuePreparationCurrent(preparation);
+      this._publish("reader:queue-audio-preparation", {
+        operationId,
+        sessionId: session.id,
+        state: "ready",
+        audioKey: audioId,
+        voiceId: voice,
+        textLength: text.length,
+        elapsedMs: Math.max(0, this.now() - startedAt)
+      });
+      return { audioKey: audioId };
+    } catch (error) {
+      const diagnostics = serializeErrorDiagnostics(error);
+      this._publish("reader:queue-audio-preparation", {
+        operationId,
+        sessionId: session.id,
+        state: "error",
+        message: error?.message || "No se pudo preparar el primer audio local.",
+        code: error?.code,
+        phase: error?.phase || "synthesis",
+        requestId: error?.requestId,
+        voiceId: voice,
+        textLength: text.length,
+        elapsedMs: Math.max(0, this.now() - startedAt),
+        diagnostics
+      });
+      const status = await Promise.resolve(this.inference.preparationStatus?.(voice)).catch(() => null);
+      if (status?.state === "error") {
+        this._publish("reader:model", {
+          provider, voiceId: voice, state: "error", phase: error?.phase || "synthesis",
+          code: error?.code, diagnostics, message: error?.message || "Falló la síntesis local."
+        });
+      }
+      throw error;
+    } finally {
+      if (this.queuePreparations.get(operationId) === preparation) this.queuePreparations.delete(operationId);
+    }
   }
 
   async handleCommand(message) {
@@ -413,6 +579,46 @@ export class PersistentReaderEngine {
         void this.player.prepare();
         return this._response();
       }
+      case "prepare-queue-audio": {
+        const session = message.session;
+        const operationId = String(message.operationId || "");
+        if (!operationId || !session?.id || !session.queuePrepared || !Array.isArray(session.chunks) || !session.chunks.length) {
+          throw new Error("La solicitud no contiene una cola válida para preparar.");
+        }
+        getVoiceRecord(session.voice || session.voiceId);
+        this._cancelQueuePreparations("Se inició otra preparación de cola.");
+        const preparation = {
+          operationId,
+          session: { ...session, chunks: [...session.chunks] },
+          generation: this.sessionGeneration,
+          cancelled: false
+        };
+        this.queuePreparations.set(operationId, preparation);
+        this._publish("reader:queue-audio-preparation", {
+          operationId,
+          sessionId: session.id,
+          state: "generating",
+          event: {
+            phase: "synthesis", stage: "request-started", voiceId: session.voice || session.voiceId,
+            textLength: session.chunks[0].length, fragmentIndex: 0, fragmentTotal: session.chunks.length,
+            elapsedMs: 0
+          },
+          message: "Preparando el primer audio local…"
+        });
+        void this._prepareQueueFirstAudio(preparation).catch(() => {});
+        return { ok: true, operationId, sessionId: this.activeSession?.id || null, snapshot: this.player.snapshot() };
+      }
+      case "cancel-queue-audio-preparation": {
+        const preparation = this.queuePreparations.get(String(message.operationId || ""));
+        if (preparation) {
+          preparation.cancelled = true;
+          this._publish("reader:queue-audio-preparation", {
+            operationId: preparation.operationId, sessionId: preparation.session.id,
+            state: "cancelled", message: "La preparación de audio se canceló; la cola anterior sigue intacta."
+          });
+        }
+        break;
+      }
       case "replace": {
         const session = message.session;
         if (!session?.id || !session.queuePrepared || !Array.isArray(session.chunks) || !session.chunks.length) {
@@ -422,13 +628,15 @@ export class PersistentReaderEngine {
           this.player.stop();
           await this.saveTail;
         }
-        this._applySession(session);
-        await this.repository.saveSession(this.activeSession);
+        const candidate = { ...session, audioKeys: Array.isArray(session.audioKeys) ? [...session.audioKeys] : [] };
+        await this.repository.saveSession(candidate);
+        this._applySession(candidate);
         return this._response();
       }
       case "pause": this.player.pause(); break;
       case "stop":
         this.sessionGeneration++;
+        this._cancelQueuePreparations("La preparación del primer audio se detuvo.");
         this.player.stop();
         break;
       case "forget-session": {
@@ -489,7 +697,7 @@ export class PersistentReaderEngine {
         break;
       }
       case "clear-audio-cache": {
-        if (this.audioCacheMaintenance || isAudioStorageBusy(this.player.snapshot(), this.inFlightAudio.size > 0 || this._hasProviderOperation())) {
+        if (this.audioCacheMaintenance || isAudioStorageBusy(this.player.snapshot(), this.inFlightAudio.size > 0 || this._hasProviderOperation() || this.queuePreparations.size > 0)) {
           throw storageOperationBusyError("Hay una lectura o síntesis en curso. Espera a que termine antes de eliminar los audios guardados.");
         }
         this.audioCacheMaintenance = true;
