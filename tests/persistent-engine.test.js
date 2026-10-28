@@ -69,6 +69,22 @@ async function waitFor(predicate, message = "Timed out waiting for the persisten
   assert.fail(message);
 }
 
+async function prepareAndCommitQueue(engine, repository, record) {
+  const operationId = `test-queue-${Math.random().toString(36).slice(2)}`;
+  await engine.handleCommand({ command: "prepare-queue-audio", session: record, operationId });
+  await waitFor(() => !engine.queuePreparations.has(operationId), "complete queue preparation did not finish");
+  const audioRecords = record.chunks.map((text) => [...repository.audio.values()].find((item) => item.text === text && item.voice === record.voice));
+  if (audioRecords.some((item) => !item?.blob)) throw new Error("queue preparation did not cache every WAV");
+  const prepared = {
+    ...record,
+    audioKeys: audioRecords.map((item) => item.id),
+    durations: audioRecords.map((item) => item.duration),
+    chunkStates: audioRecords.map(() => "ready")
+  };
+  await engine.handleCommand({ command: "replace", session: prepared });
+  return prepared;
+}
+
 function makeEngine(repository, synthCalls = [], publish = () => {}) {
   const audio = new MockAudio();
   const inference = {
@@ -151,14 +167,19 @@ test("Piper reset bypasses a pending initialization, reports its operation, and 
   assert.equal(resetCalls, 1, "reset cannot interrupt audio that is using Piper");
 });
 
-test("offscreen engine prebuffers one next chunk and advances without a connected panel", async () => {
+test("offscreen engine prepares the whole queue before sequential playback, without a connected panel", async () => {
   const repository = new MemoryRepository();
   const synthCalls = [];
   const { audio, engine } = makeEngine(repository, synthCalls, () => { throw new Error("panel closed"); });
 
-  await engine.handleCommand({ command: "start", session: session() });
+  const prepared = await prepareAndCommitQueue(engine, repository, { ...session(), queuePrepared: true });
+  assert.equal(synthCalls.length, 2, "every fragment is synthesized before playback starts");
+  assert.equal(audio.playCount, 0, "queue preparation never autoplays");
+  assert.deepEqual(prepared.chunkStates, ["ready", "ready"]);
+  assert.equal(prepared.durations.length, 2);
+  assert.ok(prepared.durations.every((duration) => duration > 0));
+  await engine.handleCommand({ command: "start", session: prepared });
   assert.equal(engine.player.snapshot().status, "playing");
-  await waitFor(() => synthCalls.length === 2, "the next fragment was not synthesized while the first played");
   assert.deepEqual(synthCalls.map(({ text }) => text), ["First.", "Second."]);
   await waitFor(() => repository.audio.size === 2, "the audio buffer did not persist its next WAV");
   assert.equal(repository.audio.size, 2);
@@ -176,7 +197,7 @@ test("the persistent engine rejects duplicate starts for its active session", as
   const repository = new MemoryRepository();
   const calls = [];
   const { audio, engine } = makeEngine(repository, calls);
-  const record = session();
+  const record = await prepareAndCommitQueue(engine, repository, { ...session(), queuePrepared: true });
   await engine.handleCommand({ command: "start", session: record });
   await engine.handleCommand({ command: "start", session: record });
   assert.equal(audio.playCount, 1);
@@ -198,14 +219,14 @@ test("loading a prepared queue persists it without synthesizing or starting audi
   assert.deepEqual(calls, []);
 });
 
-test("queue replacement waits for a valid first WAV and preserves the previous session until commit", async () => {
+test("queue replacement waits for every valid WAV and preserves the previous session until commit", async () => {
   const repository = new MemoryRepository();
   const calls = [];
   const published = [];
   const { audio, engine } = makeEngine(repository, calls, (message) => published.push(message));
   const previous = { ...session(), id: "previous-session", queuePrepared: true, audioKeys: [] };
   const candidate = {
-    ...session(), id: "candidate-session", sourceText: "Candidate text.", chunks: ["Candidate text."],
+    ...session(), id: "candidate-session", sourceText: "Candidate first. Candidate second.", chunks: ["Candidate first.", "Candidate second."],
     queuePrepared: true, voice: "af_heart", audioKeys: []
   };
   await engine.handleCommand({ command: "restore", session: previous });
@@ -214,26 +235,34 @@ test("queue replacement waits for a valid first WAV and preserves the previous s
   await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "candidate-op" });
   assert.equal(engine.activeSession.id, previous.id, "candidate synthesis must not replace the active queue");
   assert.ok(repository.sessions.has(previous.id));
-  assert.equal(repository.sessions.has(candidate.id), false, "the candidate is not persisted as a session before its first WAV succeeds");
+  assert.equal(repository.sessions.has(candidate.id), false, "the candidate is not persisted before all WAVs succeed");
   assert.equal(audio.playCount, 0);
 
   await waitFor(() => published.some((message) => message.type === "reader:queue-audio-preparation" && message.state === "ready"));
   const result = published.find((message) => message.type === "reader:queue-audio-preparation" && message.state === "ready");
   assert.equal(engine.activeSession.id, previous.id);
-  assert.equal(result.audioKey, [...repository.audio.keys()][0]);
-  assert.equal(repository.audio.size, 1);
-  assert.ok(repository.audio.get(result.audioKey).blob.size > 0);
-  assert.equal(audio.playCount, 0, "preparing the first audio must not autoplay");
+  assert.equal(result.audioKeys.length, candidate.chunks.length);
+  assert.equal(result.durations.length, candidate.chunks.length);
+  assert.ok(result.chunkStates.every((state) => state === "ready"));
+  assert.equal(repository.audio.size, candidate.chunks.length);
+  assert.ok(result.audioKeys.every((key) => repository.audio.get(key).blob.size > 0));
+  const secondFragmentProgress = published.find((message) => message.type === "reader:queue-audio-preparation"
+    && message.state === "generating" && message.event?.fragmentIndex === 2 && message.event?.stage === "fragment-ready");
+  assert.equal(secondFragmentProgress.event.fragmentTotal, 2);
+  assert.equal(secondFragmentProgress.event.progress, 100);
+  assert.equal(audio.playCount, 0, "complete queue preparation must not autoplay");
   assert.equal(JSON.stringify(published).includes("Candidate text."), false, "progress messages must never expose the source text");
 
   const committed = {
     ...candidate,
-    audioKeys: [result.audioKey],
-    chunkStates: ["ready"]
+    audioKeys: result.audioKeys,
+    durations: result.durations,
+    chunkStates: result.chunkStates
   };
   await engine.handleCommand({ command: "replace", session: committed });
   assert.equal(engine.activeSession.id, candidate.id);
-  assert.deepEqual(engine.activeSession.audioKeys, [result.audioKey]);
+  assert.deepEqual(engine.activeSession.audioKeys, result.audioKeys);
+  assert.equal(engine.player.snapshot().totalDuration, result.durations.reduce((sum, duration) => sum + duration, 0));
   assert.equal(audio.playCount, 0);
 });
 
@@ -266,6 +295,37 @@ test("an invalid first WAV fails candidate preparation without caching it or rep
   assert.equal(repository.sessions.has(previous.id), true);
   assert.equal(repository.audio.size, 0, "empty/invalid output must never enter the audio cache");
   assert.equal(audio.playCount, 0);
+});
+
+test("a later fragment failure never marks a partially cached candidate as ready", async () => {
+  const repository = new MemoryRepository();
+  const published = [];
+  let calls = 0;
+  const previous = { ...session(), id: "previous-session", queuePrepared: true };
+  const candidate = {
+    ...session(), id: "candidate-session", sourceText: "First candidate. Second candidate.",
+    chunks: ["First candidate.", "Second candidate."], queuePrepared: true, audioKeys: []
+  };
+  const engine = new PersistentReaderEngine({
+    audio: new MockAudio(), repository, publish: (message) => published.push(message),
+    inference: {
+      async synthesize() {
+        calls++;
+        if (calls === 2) throw new Error("second fragment failed");
+        return makeWavBlob();
+      },
+      preparationStatus() { return { state: "ready" }; }
+    }
+  });
+  await engine.handleCommand({ command: "restore", session: previous });
+  await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "second-fragment-failure" });
+  await waitFor(() => !engine.queuePreparations.has("second-fragment-failure"));
+
+  assert.equal(engine.activeSession.id, previous.id);
+  assert.equal(repository.sessions.has(candidate.id), false);
+  assert.equal(repository.audio.size, 1, "the successfully generated WAV may remain cached for a retry");
+  assert.equal(published.some((message) => message.type === "reader:queue-audio-preparation" && message.state === "ready"), false);
+  assert.ok(published.some((message) => message.type === "reader:queue-audio-preparation" && message.state === "error"));
 });
 
 test("prepare-audio synthesizes the first fragment in the offscreen engine without starting playback", async () => {
@@ -312,6 +372,20 @@ test("the persistent engine refuses to play an editor draft that was never loade
   assert.deepEqual(calls, []);
 });
 
+test("the persistent engine refuses playback until every WAV is cached and validated", async () => {
+  const repository = new MemoryRepository();
+  const calls = [];
+  const { audio, engine } = makeEngine(repository, calls);
+  const previous = { ...session(), id: "previous-session", queuePrepared: true };
+  const incomplete = { ...session(), id: "incomplete-session", queuePrepared: true };
+  await engine.handleCommand({ command: "replace", session: previous });
+
+  await assert.rejects(engine.handleCommand({ command: "start", session: incomplete }), (error) => error.code === "AUDIO_QUEUE_NOT_PREPARED");
+  assert.equal(engine.activeSession.id, previous.id, "a partial candidate does not replace the active queue");
+  assert.equal(audio.playCount, 0);
+  assert.deepEqual(calls, [], "start must never lazily synthesize while the player is active");
+});
+
 test("restoring a prepared queue never autoplays and reconnecting the same session does not reset it", async () => {
   const repository = new MemoryRepository();
   const { audio, engine } = makeEngine(repository);
@@ -330,7 +404,7 @@ test("restoring a prepared queue never autoplays and reconnecting the same sessi
   assert.equal(audio.playCount, 0);
 });
 
-test("forgetting a deleted session fences late synthesis writes from restoring its record or WAV", async () => {
+test("cancelling complete queue preparation fences late synthesis writes from caching a WAV", async () => {
   const repository = new MemoryRepository();
   let finishSynthesis;
   const inference = {
@@ -339,13 +413,15 @@ test("forgetting a deleted session fences late synthesis writes from restoring i
     async dispose() {}
   };
   const engine = new PersistentReaderEngine({ audio: new MockAudio(), repository, inference });
-  const starting = engine.handleCommand({ command: "start", session: session() });
+  const candidate = { ...session(), queuePrepared: true };
+  await engine.handleCommand({ command: "replace", session: candidate });
+  await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "late-synthesis" });
   await waitFor(() => typeof finishSynthesis === "function", "synthesis did not start");
 
   await engine.handleCommand({ command: "forget-session", sessionId: "session-a", preserve: false });
   repository.sessions.delete("session-a");
   finishSynthesis(makeWavBlob());
-  await starting;
+  await waitFor(() => !engine.queuePreparations.has("late-synthesis"));
   await delay();
 
   assert.equal(repository.sessions.has("session-a"), false);
@@ -358,7 +434,8 @@ test("saved playback recovers after the offscreen engine is recreated without au
   const firstCalls = [];
   const first = makeEngine(repository, firstCalls);
   const oneChunkSession = { ...session(), sourceText: "First.", chunks: ["First."] };
-  await first.engine.handleCommand({ command: "start", session: oneChunkSession });
+  const prepared = await prepareAndCommitQueue(first.engine, repository, { ...oneChunkSession, queuePrepared: true });
+  await first.engine.handleCommand({ command: "start", session: prepared });
   first.audio.currentTime = 2.5;
   first.audio.emit("timeupdate");
   await new Promise((resolve) => setTimeout(resolve, 1050));
@@ -378,7 +455,7 @@ test("saved playback recovers after the offscreen engine is recreated without au
   assert.deepEqual(secondCalls, [], "cached WAV should resume without synthesizing it again");
 });
 
-test("generation failures persist their chunk error and restore without autoplay", async () => {
+test("a fragment failure leaves the candidate queue uncommitted and does not autoplay", async () => {
   const repository = new MemoryRepository();
   const audio = new MockAudio();
   const inference = {
@@ -388,17 +465,12 @@ test("generation failures persist their chunk error and restore without autoplay
   };
   const first = new PersistentReaderEngine({ audio, repository, inference });
 
-  await first.handleCommand({ command: "start", session: session() });
-  await waitFor(() => repository.sessions.get("session-a")?.status === "error");
-  const recovered = repository.sessions.get("session-a");
-  assert.deepEqual(recovered.chunkStates, ["error", "pending"]);
-  assert.equal(recovered.lastError, "Kokoro no pudo iniciar.");
-
-  const second = makeEngine(repository);
-  second.engine._applySession(recovered, { restore: true });
-  assert.equal(second.engine.player.snapshot().status, "error");
-  assert.equal(second.engine.player.snapshot().message, "Kokoro no pudo iniciar.");
-  assert.equal(second.audio.playCount, 0);
+  const candidate = { ...session(), queuePrepared: true };
+  await first.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "failure-op" });
+  await waitFor(() => !first.queuePreparations.has("failure-op"));
+  assert.equal(repository.sessions.has(candidate.id), false);
+  assert.equal(repository.audio.size, 0);
+  assert.equal(audio.playCount, 0);
 });
 
 test("Piper synthesis diagnostics keep their code and phase in model-state messages", async () => {
@@ -418,7 +490,7 @@ test("Piper synthesis diagnostics keep their code and phase in model-state messa
     }
   });
 
-  await engine.handleCommand({ command: "start", session: { ...session(), sourceText: "Hola.", chunks: ["Hola."], voice: voiceId } });
+  await engine.handleCommand({ command: "prepare-queue-audio", session: { ...session(), sourceText: "Hola.", chunks: ["Hola."], voice: voiceId, queuePrepared: true }, operationId: "piper-failure" });
   await waitFor(() => published.some((message) => message.type === "reader:model" && message.state === "error"));
   const failure = published.find((message) => message.type === "reader:model" && message.state === "error");
   assert.equal(failure.code, "PIPER_SYNTHESIS_TIMEOUT");
@@ -428,9 +500,8 @@ test("Piper synthesis diagnostics keep their code and phase in model-state messa
 test("audio-cache deletion refuses to remove WAVs while playback is using the reader", async () => {
   const repository = new MemoryRepository();
   const { audio, engine } = makeEngine(repository);
-  await engine.handleCommand({ command: "start", session: { ...session(), chunks: ["First."], sourceText: "First." } });
-  await waitFor(() => repository.audio.size === 1);
-  await waitFor(() => repository.sessions.get("session-a")?.audioKeys?.length === 1);
+  const prepared = await prepareAndCommitQueue(engine, repository, { ...session(), chunks: ["First."], sourceText: "First.", queuePrepared: true });
+  await engine.handleCommand({ command: "start", session: prepared });
 
   await assert.rejects(engine.handleCommand({ command: "clear-audio-cache" }), /STORAGE_OPERATION_BUSY/);
   assert.equal(engine.player.snapshot().status, "playing");
@@ -459,8 +530,8 @@ test("Kokoro model deletion is blocked while Kokoro is reading and disposes only
     async dispose() {}
   };
   const engine = new PersistentReaderEngine({ audio, repository, inference, storage: { async remove(key) { removedStorageKeys.push(key); } } });
-  await engine.handleCommand({ command: "start", session: { ...session(), chunks: ["First."], sourceText: "First." } });
-  await waitFor(() => repository.audio.size === 1);
+  const prepared = await prepareAndCommitQueue(engine, repository, { ...session(), chunks: ["First."], sourceText: "First.", queuePrepared: true });
+  await engine.handleCommand({ command: "start", session: prepared });
 
   await assert.rejects(engine.handleCommand({ command: "delete-model" }), /STORAGE_OPERATION_BUSY/);
   assert.deepEqual(deleted, []);
@@ -487,7 +558,8 @@ test("deleting one Piper model is blocked while its voice is active", async () =
   };
   const engine = new PersistentReaderEngine({ audio, repository, inference });
   const piperSession = { ...session(), voice: voice.id, voiceId: voice.id, voiceProvider: "piper", chunks: ["Hola."], sourceText: "Hola." };
-  await engine.handleCommand({ command: "start", session: piperSession });
+  const prepared = await prepareAndCommitQueue(engine, repository, { ...piperSession, queuePrepared: true });
+  const started = await engine.handleCommand({ command: "start", session: prepared });
   await waitFor(() => repository.audio.size === 1);
 
   await assert.rejects(engine.handleCommand({ command: "delete-piper-model", voiceId: voice.id }), /STORAGE_OPERATION_BUSY/);
@@ -498,6 +570,37 @@ test("deleting one Piper model is blocked while its voice is active", async () =
   await engine.handleCommand({ command: "delete-piper-model", voiceId: voice.id });
   assert.deepEqual(deleted, [voice.id]);
   assert.equal(repository.audio.size, 1, "deleting Piper must not clear saved WAVs");
+});
+
+test("Piper reset and model deletion are blocked throughout a candidate queue preparation", async () => {
+  const repository = new MemoryRepository();
+  const voice = PIPER_VOICE_CATALOG[0];
+  let finishSynthesis;
+  let synthCount = 0;
+  let resetCalls = 0;
+  const engine = new PersistentReaderEngine({
+    audio: new MockAudio(), repository,
+    inference: {
+      synthesize() {
+        synthCount++;
+        return synthCount === 1
+          ? new Promise((resolve) => { finishSynthesis = resolve; })
+          : Promise.resolve(makeWavBlob(22050));
+      },
+      resetPiperEngine() { resetCalls++; return { reset: true }; },
+      async deletePiperModel() { return { deleted: true }; }
+    }
+  });
+  const candidate = { ...session(), voice: voice.id, voiceId: voice.id, voiceProvider: "piper", queuePrepared: true };
+  await engine.handleCommand({ command: "prepare-queue-audio", session: candidate, operationId: "piper-maintenance-guard" });
+  await waitFor(() => typeof finishSynthesis === "function");
+
+  await assert.rejects(engine.handleCommand({ command: "reset-piper-engine", voiceId: voice.id }), /STORAGE_OPERATION_BUSY/);
+  await assert.rejects(engine.handleCommand({ command: "delete-piper-model", voiceId: voice.id }), /STORAGE_OPERATION_BUSY/);
+  assert.equal(resetCalls, 0);
+
+  finishSynthesis(makeWavBlob(22050));
+  await waitFor(() => !engine.queuePreparations.has("piper-maintenance-guard"));
 });
 
 test("provider model deletion is blocked during model initialization and can be retried after it completes", async () => {
@@ -579,8 +682,9 @@ test("Piper generates and caches local WAVs by pinned voice/model and switching 
   const initialized = await engine.handleCommand({ command: "initialize", voice: voice.id });
   assert.equal(initialized.result.provider, "piper");
   assert.equal(initialized.result.voiceId, voice.id);
-  const started = await engine.handleCommand({ command: "start", session: piperSession });
-  await waitFor(() => repository.audio.size === 2, "both Piper WAV fragments should be cached");
+  const prepared = await prepareAndCommitQueue(engine, repository, { ...piperSession, queuePrepared: true });
+  const started = await engine.handleCommand({ command: "start", session: prepared });
+  assert.equal(repository.audio.size, 2, "both Piper WAV fragments are cached before playback");
   assert.equal(started.snapshot.activeProvider, "piper");
   assert.match(started.currentAudioKey, /^piper-v1-/);
   assert.deepEqual(synthCalls.map(({ voiceId }) => voiceId), [voice.id, voice.id]);

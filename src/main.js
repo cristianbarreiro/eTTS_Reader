@@ -204,15 +204,15 @@ function updateQueueSyncUI(override = "") {
   let state = override ? "error" : "empty";
   if (!override && queueLoadBusy) {
     message = queueLoadPhase === "audio"
-      ? "Voz lista · cargando la cola y preparando el primer audio…"
+      ? "Voz lista · cargando la cola y preparando todos sus fragmentos…"
       : "Preparando la voz local antes de cargar la cola…";
     state = "loading";
   } else if (!override && matches) {
     if (snapshot?.status === "generating") {
-      message = "Cola cargada · generando el primer audio local…";
+      message = "Cola cargada · generando todos los fragmentos de audio…";
       state = "loading";
     } else if (snapshot?.status === "audio-ready") {
-      message = "Audio preparado · pulsa Reproducir para escucharlo.";
+      message = "Documento completo preparado · iniciando la reproducción…";
       state = "current";
     } else if (snapshot?.status === "error") {
       message = "No se pudo preparar el audio · vuelve a cargar el contenido para reintentarlo.";
@@ -334,18 +334,21 @@ function describePlayer(snapshot) {
   if (snapshot.status === "generating") {
     if (snapshot.activeKind === "preview") return "Preparando una muestra local de voz.";
     const fragment = `fragmento ${snapshot.selectedIndex + 1} de ${snapshot.chunks.length}`;
+    const preparingFragment = Number.isInteger(snapshot.generationFragmentIndex)
+      && Number.isInteger(snapshot.generationFragmentTotal)
+      ? `fragmento ${snapshot.generationFragmentIndex} de ${snapshot.generationFragmentTotal}` : fragment;
     if (snapshot.generationPhase === "initialize") return `Preparando la voz local para generar el ${fragment}.`;
     if (snapshot.generationStage === "model-generate") {
       const part = Number.isInteger(snapshot.generationTotalParts) && snapshot.generationTotalParts > 1
         ? `, parte ${Math.max(1, Number(snapshot.generationCompletedParts) + 1)} de ${snapshot.generationTotalParts}` : "";
       const elapsed = Number.isFinite(snapshot.generationElapsedMs)
         ? ` · ${formatTime(Math.floor(snapshot.generationElapsedMs / 1000))} transcurridos` : "";
-      return `Kokoro está calculando ${fragment}${part}${elapsed}. Esta etapa no informa un porcentaje interno.`;
+      return `${activeProvider === "piper" ? "Piper" : "Kokoro"} está calculando ${preparingFragment}${part}${elapsed}. Esta etapa no informa un porcentaje interno.`;
     }
-    if (Number.isFinite(snapshot.generationProgress)) return `Generando el ${fragment} · ${Math.round(snapshot.generationProgress * 100)}%.`;
+    if (Number.isFinite(snapshot.generationProgress)) return `Generando el ${preparingFragment} · ${Math.round(snapshot.generationProgress * 100)}%.`;
     const elapsed = Number.isFinite(snapshot.generationElapsedMs)
       ? ` · ${formatTime(Math.floor(snapshot.generationElapsedMs / 1000))} transcurridos` : "";
-    return `Generando el ${fragment}${elapsed}…`;
+    return `Generando el ${preparingFragment}${elapsed}…`;
   }
   if (snapshot.status === "audio-ready") return snapshot.activeKind === "preview"
     ? "La muestra local está lista para reproducirse."
@@ -784,23 +787,20 @@ async function loadEditorToPlayer() {
         if (!isCurrent()) return false;
         queuePreparationId = makeId("queue-preparation");
         queuePreparationStarted = true;
-        const firstAudio = await player.prepareQueueAudio(prepared, queuePreparationId);
+        const preparedAudio = await player.prepareQueueAudio(prepared, queuePreparationId);
         if (!isCurrent()) {
           void player.cancelQueueAudioPreparation(queuePreparationId).catch(() => {});
           return false;
         }
-        const audioKeys = [...(prepared.audioKeys || [])];
-        const chunkStates = [...(prepared.chunkStates || prepared.chunks.map(() => "pending"))];
-        audioKeys[0] = firstAudio.audioKey;
-        chunkStates[0] = "ready";
-        prepared.audioKeys = audioKeys;
-        prepared.chunkStates = chunkStates;
+        prepared.audioKeys = [...preparedAudio.audioKeys];
+        prepared.durations = [...preparedAudio.durations];
+        prepared.chunkStates = [...preparedAudio.chunkStates];
         queueMutated = true;
         await player.replace(prepared);
         currentSession = player.session || prepared;
         editingForked = false;
-        if (!(await prepareQueuedAudio(prepared.id, voice))) {
-          loadNotice = "La cola quedó cargada, pero no se confirmó el inicio del audio. Vuelve a cargarla para reintentar la preparación.";
+        if (!(await startPreparedQueue(prepared.id, voice))) {
+          loadNotice = "El audio completo quedó preparado, pero el navegador no inició la reproducción. Pulsa Reproducir para comenzar.";
         }
         void chrome.storage.local.set({
           ...(currentDocument?.id ? { lastDocumentId: currentDocument.id } : {}),
@@ -837,7 +837,7 @@ async function loadEditorToPlayer() {
   }
 }
 
-async function prepareQueuedAudio(sessionId, voice) {
+async function startPreparedQueue(sessionId, voice) {
   const queue = player.session;
   if (!queue || queue.id !== sessionId || (queue.voice || queue.voiceId) !== voice
       || ui.voice.value !== voice
@@ -845,8 +845,7 @@ async function prepareQueuedAudio(sessionId, voice) {
     return false;
   }
   try {
-    await withBoundedWait(player.prepareAudio(sessionId), 20_000, "El reproductor no confirmó el inicio de la preparación. La cola quedó cargada y puedes volver a intentarlo.");
-    return true;
+    return await withBoundedWait(player.play(), 20_000, "El reproductor no pudo iniciar el audio completo preparado.");
   } catch (error) {
     showError(error, "playback");
     return false;
@@ -1013,7 +1012,7 @@ async function refreshLibrary() {
     selection: "Selección web", combined: "Texto combinado", recovered: "Texto recuperado"
   })[type] || String(type || "Documento").toUpperCase();
   const sessionState = (status) => ({
-    playing: "en reproducción", generating: "generando audio", "audio-ready": "audio listo", paused: "pausada",
+    playing: "en reproducción", generating: "generando audio", "audio-ready": "documento preparado", paused: "pausada",
     interrupted: "interrumpida", completed: "completada", error: "con error", stopped: "detenida", "text-ready": "lista para leer", empty: "vacía"
   })[status] || "guardada";
   const voiceName = (voice) => [...ui.voice.options].find((option) => option.value === voice)?.textContent?.trim() || voice || "voz predeterminada";

@@ -13,7 +13,7 @@ export function cleanForSpeech(text) {
     .trim();
 }
 
-export function splitText(text, maxChars = 430) {
+export function splitText(text, maxChars = 1200) {
   const normalized = cleanForSpeech(text);
   if (!normalized) return [];
   const paragraphs = normalized.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
@@ -34,7 +34,15 @@ export function splitText(text, maxChars = 430) {
       if (!sentence) continue;
       if (sentence.length > maxChars) {
         flush();
-        for (let start = 0; start < sentence.length; start += maxChars) chunks.push(sentence.slice(start, start + maxChars));
+        let remaining = sentence;
+        while (remaining.length > maxChars) {
+          const window = remaining.slice(0, maxChars + 1);
+          const boundary = window.lastIndexOf(" ", maxChars);
+          const splitAt = boundary > 0 ? boundary : maxChars;
+          chunks.push(remaining.slice(0, splitAt).trim());
+          remaining = remaining.slice(splitAt).trim();
+        }
+        if (remaining) chunks.push(remaining);
       } else if (!current) {
         current = sentence;
         currentParagraphIndex = paragraphIndex;

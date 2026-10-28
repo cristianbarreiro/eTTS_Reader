@@ -35,3 +35,12 @@ export async function validateWavBlob(blob) {
   }
   return true;
 }
+
+export async function getWavDuration(blob) {
+  await validateWavBlob(blob);
+  const header = await blob.slice(0, 44).arrayBuffer();
+  const view = new DataView(header);
+  const duration = view.getUint32(40, true) / view.getUint32(28, true);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("El WAV no contiene una duración válida.");
+  return duration;
+}

@@ -13,6 +13,7 @@ test("player heading exposes only meaningful playback states", () => {
   assert.equal(playerHeaderState("stopped"), "");
   assert.equal(playerHeaderState("starting"), "Iniciando voz");
   assert.equal(playerHeaderState("generating"), "Preparando audio");
+  assert.equal(playerHeaderState("audio-ready"), "Fragmento listo");
   assert.equal(playerHeaderState("playing"), "Reproduciendo");
   assert.equal(playerHeaderState("paused"), "Pausado");
   assert.equal(playerHeaderState("interrupted"), "Lectura interrumpida");
@@ -37,8 +38,17 @@ test("Kokoro model inference stays indeterminate and reports elapsed time withou
     generationTotalParts: 3,
     generationElapsedMs: 48_000
   });
-  assert.equal(caption, "Inferencia Kokoro · parte 1/3 · 0:48 transcurridos");
+  assert.equal(caption, "Inferencia local · parte 1/3 · 0:48 transcurridos");
   assert.doesNotMatch(caption, /0%/);
+});
+
+test("document preparation progress identifies the fragment being generated", () => {
+  const caption = readingProgressCaption({
+    status: "generating", generationStage: "request-started", generationPhase: "synthesis",
+    generationProgress: null, generationFragmentIndex: 5, generationFragmentTotal: 12,
+    generationElapsedMs: 3_000
+  });
+  assert.equal(caption, "Generando audio local · fragmento 5/12 · 0:03 transcurridos");
 });
 
 test("duration summary never presents zero as a measured duration before audio metadata exists", () => {

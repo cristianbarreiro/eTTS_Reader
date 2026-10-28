@@ -27,3 +27,10 @@ test("splitText preserves order and keeps chunks within the requested limit", ()
 test("splitText returns no chunks for empty content", () => {
   assert.deepEqual(splitText(" \n  "), []);
 });
+
+test("default playback chunks are larger while long sentences still split at word boundaries", () => {
+  const chunks = splitText("palabra ".repeat(400));
+  assert.equal(chunks.length, 3);
+  assert.ok(chunks.every((chunk) => chunk.length <= 1200));
+  assert.equal(chunks.join(" "), "palabra ".repeat(400).trim());
+});

@@ -34,8 +34,8 @@ flowchart TD
 | `sidepanel.html`, `src/main.js` | Editor, importación, selector de voz, controles, biblioteca y estado visual | No ejecutar inferencia pesada ni ser la única autoridad de la reproducción |
 | `src/background.js` | Eventos de extensión, permisos, captura y autorización de pestañas, menú contextual, creación y mensajería hacia offscreen | No mantener vivo el worker artificialmente ni leer el contenido de una página sin acción/permisos válidos |
 | `offscreen.html`, `src/offscreen.js` | Crear el repositorio, router y motor persistente dentro del contexto de audio | Una sola autoridad de sesión activa; no duplicar el reproductor en el panel |
-| `src/persistent-engine.js` | Procesar comandos, organizar cola, sintetizar fragmentos, guardar progreso y preparar como máximo el siguiente fragmento | No acoplar la lógica a un proveedor concreto |
-| `src/player-controller.js` | Estado de reproducción del WAV, progreso, pausa, reanudación, búsqueda y navegación entre fragmentos | Debe consumir audio generado y mantener el contrato común de los proveedores |
+| `src/persistent-engine.js` | Procesar comandos, sintetizar y cachear todos los fragmentos de forma secuencial, informar progreso y duración agregados | No acoplar la lógica a un proveedor concreto ni reproducir durante la síntesis |
+| `src/player-controller.js` | Reproducir los WAV ya generados, controlar progreso, pausa, reanudación, búsqueda y navegación | Debe consumir audio generado y mantener el contrato común de los proveedores |
 | `src/tts-router.js` | Enrutar por identificador y proveedor de voz | Debe fallar explícitamente ante IDs desconocidos; no asumir que todo ID es Kokoro |
 | `src/tts-worker-client.js`, `src/tts-worker.js`, `src/tts.js` | Worker e inferencia de Kokoro | Mantener separados sus recursos/runtime de los de Piper |
 | `src/piper-worker-client.js`, `src/piper-tts-worker.js`, `src/piper-tts.js` | Catálogo Piper, fonemización, inferencia ONNX, conversión PCM→WAV y ciclo de vida del worker | Aplicar plazos por operación en el cliente, terminar workers bloqueados e ignorar sus mensajes tardíos; permitir reconstruirlos sin borrar modelos |
@@ -45,13 +45,13 @@ flowchart TD
 
 ## 2. Flujo de lectura
 
-1. El usuario introduce/importa texto, elige una voz y pulsa **Cargar al reproductor**. Si la voz seleccionada no está lista, ese primer clic solo descarga/prepara la voz: no reemplaza la cola ni genera audio. La interfaz pide volver a pulsar el botón. En el segundo clic, con la voz lista, reemplaza la cola y empieza a generar el primer WAV local. El reproductor muestra la fase o el progreso disponible; cargar la cola nunca inicia la reproducción. Si la preparación falla, el texto permanece en el editor y la cola actual se conserva.
+1. El usuario introduce/importa texto, elige una voz y pulsa **Cargar al reproductor**. Si la voz seleccionada no está lista, ese primer clic solo descarga/prepara la voz: no reemplaza la cola ni genera audio. La interfaz pide volver a pulsar el botón. En el segundo clic, con la voz lista, el motor genera, valida, mide y cachea todos los fragmentos, uno por vez, sin reproducir. La UI no declara la cola preparada antes de completar esa tarea. Si falla o se cancela, el texto permanece en el editor y la cola actual se conserva.
 2. `ReaderClient` comunica los comandos al background, que enruta al documento offscreen.
 3. `PersistentReaderEngine` mantiene sesión, fragmentos, progreso y política de caché.
 4. `TTSProviderRouter` identifica el proveedor según el ID persistido y llama a Kokoro o Piper.
 5. El worker del proveedor genera un `Blob` WAV. El motor valida el WAV, guarda el caché cuando procede y entrega el audio al reproductor.
-6. El botón **Play** inicia o reanuda el WAV preparado. `PlaybackController` lo reproduce mediante el elemento `audio` del offscreen. Esto hace que los controles de tiempo, duración, pausa, búsqueda y descarga compartan el mismo flujo para ambos proveedores.
-7. Durante la reproducción de un fragmento, el motor puede precargar como máximo el siguiente. Un cambio de sesión debe impedir que resultados tardíos se guarden en la sesión equivocada.
+6. Al completar la generación, la interfaz intenta iniciar automáticamente el primer WAV; si el navegador bloquea autoplay, la cola queda completa y Play permite iniciarla manualmente. `PlaybackController` reproduce los WAV en orden mediante el elemento `audio` del offscreen.
+7. La duración total se calcula con las cabeceras WAV validadas de todos los fragmentos. Un cambio de sesión debe impedir que resultados tardíos se guarden en la sesión equivocada.
 
 El flujo normal de voces no debe utilizar `SpeechSynthesis`: las voces españolas son Piper y las voces inglesas existentes son Kokoro.
 

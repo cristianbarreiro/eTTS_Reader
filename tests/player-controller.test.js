@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatTime, validateWavBlob } from "../src/audio-utils.js";
+import { formatTime, getWavDuration, validateWavBlob } from "../src/audio-utils.js";
 import { PlaybackController } from "../src/player-controller.js";
 
 function makeWavBlob(sample = 1) {
@@ -121,6 +121,7 @@ async function waitFor(predicate, message = "Timed out waiting for player state"
 
 test("WAV validation accepts generated RIFF audio and rejects corrupt payloads", async () => {
   assert.equal(await validateWavBlob(makeWavBlob()), true);
+  assert.equal(await getWavDuration(makeWavBlob()), 4 / 96_000);
   await assert.rejects(validateWavBlob(new Blob(["not audio"])), /vacío o incompleto/);
   await assert.rejects(validateWavBlob(new Blob([new Uint8Array(44)])), /cabecera WAV válida/);
   assert.equal(formatTime(65.9), "1:05");

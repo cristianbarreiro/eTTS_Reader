@@ -104,6 +104,9 @@ export class ReaderClient {
       ? Math.max(0, Math.min(1, event.progress / 100))
       : ready ? 1 : null;
     const durations = Array.isArray(session.durations) ? [...session.durations] : session.chunks.map(() => null);
+    const knownDurationCount = durations.filter(Number.isFinite).length;
+    const totalDuration = session.chunks.length > 0 && knownDurationCount === session.chunks.length
+      ? durations.reduce((sum, duration) => sum + duration, 0) : null;
     return {
       ...snapshot,
       chunks: [...session.chunks],
@@ -113,12 +116,14 @@ export class ReaderClient {
       playingIndex: null,
       pendingChunkIndices: session.chunks.slice(1).map((_, index) => index + 1),
       durations,
+      knownDurationCount,
+      totalDuration,
       currentTime: 0,
       duration: durations[0] ?? null,
       speed: Number(session.speed) || 1,
       generationProgress: progress,
       generationPhase: event.phase || "synthesis",
-      generationStage: ready ? "first-wav-ready" : event.stage || "request-started",
+      generationStage: ready ? "document-audio-ready" : event.stage || "request-started",
       generationStartedAt: preparation.startedAt,
       generationElapsedMs: Math.max(0, Date.now() - preparation.startedAt),
       generationRequestId: event.requestId ?? null,
@@ -126,6 +131,8 @@ export class ReaderClient {
       generationTextLength: Number.isFinite(event.textLength) ? event.textLength : String(session.chunks[0] || "").length,
       generationCompletedParts: Number.isInteger(event.completedParts) ? event.completedParts : null,
       generationTotalParts: Number.isInteger(event.totalParts) ? event.totalParts : null,
+      generationFragmentIndex: Number.isInteger(event.fragmentIndex) ? event.fragmentIndex : null,
+      generationFragmentTotal: Number.isInteger(event.fragmentTotal) ? event.fragmentTotal : session.chunks.length,
       activeKind: "chunk",
       activeProvider: preparation.provider || snapshot.activeProvider,
       activeVoiceId: session.voice || session.voiceId || null,
@@ -269,9 +276,18 @@ export class ReaderClient {
     this.queuePreparationWaiters.delete(message.operationId);
     if (message.state === "ready") {
       preparation.state = "ready";
-      preparation.audioKey = message.audioKey;
-      preparation.message = "Primer audio generado, validado y guardado. Aplicando la cola…";
-      preparation.event = { phase: "synthesis", stage: "first-wav-ready", progress: 100, textLength: message.textLength };
+      preparation.audioKeys = [...(message.audioKeys || [])];
+      preparation.session = {
+        ...preparation.session,
+        audioKeys: [...(message.audioKeys || [])],
+        durations: [...(message.durations || [])],
+        chunkStates: [...(message.chunkStates || [])]
+      };
+      preparation.message = "Audio completo generado y validado. Aplicando la cola…";
+      preparation.event = {
+        phase: "synthesis", stage: "document-audio-ready", progress: 100,
+        fragmentIndex: message.fragmentTotal, fragmentTotal: message.fragmentTotal
+      };
       this.onState(this.snapshot());
       waiter?.resolve(message);
       return;
@@ -300,7 +316,21 @@ export class ReaderClient {
       return response.ok !== false;
     }
     if (!this.session) return false;
-    const response = await this.request("start", { session: this.session });
+    let session = this.session;
+    const allChunksReady = session.chunks?.length > 0
+      && session.chunks.every((_, index) => session.audioKeys?.[index] && session.chunkStates?.[index] === "ready");
+    if (!allChunksReady) {
+      const operationId = `playback-prepare-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const prepared = await this.prepareQueueAudio(session, operationId);
+      session = {
+        ...session,
+        audioKeys: [...prepared.audioKeys],
+        durations: [...prepared.durations],
+        chunkStates: [...prepared.chunkStates]
+      };
+      await this.replace(session);
+    }
+    const response = await this.request("start", { session });
     return response.ok !== false;
   }
 

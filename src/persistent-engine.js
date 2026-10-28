@@ -1,6 +1,6 @@
 import { PlaybackController } from "./player-controller.js";
 import { makeAudioCacheKey } from "./persistence.js";
-import { validateWavBlob } from "./audio-utils.js";
+import { getWavDuration, validateWavBlob } from "./audio-utils.js";
 import { getVoiceProvider, getVoiceRecord, KOKORO_RUNTIME_VERSION, PIPER_PROVIDER_VERSION, voiceSessionFields } from "./voice-catalog.js";
 import { isAudioStorageBusy, isProviderVoiceInUse, storageOperationBusyError } from "./storage-safety.js";
 import { serializeErrorDiagnostics } from "./error-diagnostics.js";
@@ -85,7 +85,12 @@ export class PersistentReaderEngine {
   }
 
   _assertProviderNotInUse(provider, voiceId = null) {
-    if (isProviderVoiceInUse({
+    const queueUsesProvider = [...this.queuePreparations.values()].some((preparation) => {
+      const candidateVoice = preparation.session.voice || preparation.session.voiceId;
+      const candidate = getVoiceRecord(candidateVoice);
+      return candidate.provider === provider && (!voiceId || candidateVoice === voiceId);
+    });
+    if (queueUsesProvider || isProviderVoiceInUse({
       snapshot: this.player.snapshot(),
       session: this.activeSession,
       selectedVoiceId: this.previewVoiceId,
@@ -281,8 +286,15 @@ export class PersistentReaderEngine {
         lastError: this.activeSession.lastError
       });
     } else {
-      this.player.setChunks(this.activeSession.chunks);
-      this.player.setSpeed(this.activeSession.speed);
+      this.player.restore({
+        chunks: this.activeSession.chunks,
+        selectedIndex: this.activeSession.selectedIndex,
+        position: this.activeSession.position,
+        status: this.activeSession.status || "text-ready",
+        speed: this.activeSession.speed,
+        durations: this.activeSession.durations,
+        lastError: this.activeSession.lastError
+      });
     }
   }
 
@@ -296,6 +308,34 @@ export class PersistentReaderEngine {
         : snapshot.activeKind === "preview" ? { ...snapshot, downloadUrl: null } : null,
       currentAudioKey: snapshot.activeKind === "preview" ? this.previewAudioKey : this.activeSession?.audioKeys?.[snapshot.selectedIndex] || null
     };
+  }
+
+  async _validateCompleteSessionAudio(session = this.activeSession) {
+    const voice = session?.voice || session?.voiceId;
+    const voiceRecord = getVoiceRecord(voice);
+    const providerVersion = voiceRecord.provider === "kokoro"
+      ? KOKORO_RUNTIME_VERSION
+      : `${PIPER_PROVIDER_VERSION};${voiceRecord.modelRevision}`;
+    const durations = [];
+    for (let index = 0; index < session.chunks.length; index++) {
+      const expectedKey = await makeAudioCacheKey(session.chunks[index], voice, voiceRecord.modelId, voiceRecord.provider, providerVersion);
+      const audioKey = session.audioKeys?.[index];
+      const cached = audioKey === expectedKey ? await this.repository.getAudioChunk(audioKey) : null;
+      if (!cached?.blob || session.chunkStates?.[index] !== "ready") {
+        const error = new Error(`El audio del documento todavía no está completo (${index + 1}/${session.chunks.length}).`);
+        error.code = "AUDIO_QUEUE_NOT_PREPARED";
+        error.phase = "queue-validation";
+        throw error;
+      }
+      durations.push(await getWavDuration(cached.blob));
+    }
+    if (durations.length !== session.chunks.length || durations.some((duration) => !Number.isFinite(duration) || duration <= 0)) {
+      const error = new Error("No se pudieron validar todos los fragmentos de audio.");
+      error.code = "AUDIO_QUEUE_NOT_PREPARED";
+      error.phase = "queue-validation";
+      throw error;
+    }
+    return durations;
   }
 
   _cancelQueuePreparations(message = "La preparación de la cola se canceló.", exceptId = null) {
@@ -321,9 +361,8 @@ export class PersistentReaderEngine {
     }
   }
 
-  async _prepareQueueFirstAudio(preparation) {
+  async _prepareQueueAudio(preparation) {
     const { session, operationId } = preparation;
-    const text = session.chunks[0];
     const voice = session.voice || session.voiceId;
     const voiceRecord = getVoiceRecord(voice);
     const provider = voiceRecord.provider;
@@ -333,26 +372,27 @@ export class PersistentReaderEngine {
       : `${PIPER_PROVIDER_VERSION};${voiceRecord.modelRevision}`;
     const sampleRate = voiceRecord.sampleRate || 24000;
     const startedAt = this.now();
-    const audioId = await makeAudioCacheKey(text, voice, modelId, provider, providerVersion);
-    this._assertQueuePreparationCurrent(preparation);
+    const audioKeys = [...(session.audioKeys || [])];
+    const durations = session.chunks.map((_, index) => Number.isFinite(session.durations?.[index]) ? session.durations[index] : null);
+    const chunkStates = session.chunks.map((_, index) => audioKeys[index] ? "ready" : "pending");
 
-    const publishProgress = (event = {}) => {
+    const publishProgress = (index, text, event = {}) => {
       if (preparation.cancelled) return;
+      const fragmentProgress = Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : null;
       const safeEvent = {
         phase: String(event.phase || "synthesis"),
         ...(typeof event.stage === "string" ? { stage: event.stage } : {}),
-        ...(Number.isFinite(event.progress) ? { progress: event.progress } : {}),
+        ...(fragmentProgress === null ? {} : { progress: ((index + fragmentProgress / 100) / session.chunks.length) * 100 }),
         ...(Number.isInteger(event.completedParts) ? { completedParts: event.completedParts } : {}),
         ...(Number.isInteger(event.totalParts) ? { totalParts: event.totalParts } : {}),
         ...(Number.isInteger(event.partIndex) ? { partIndex: event.partIndex } : {}),
         ...(Number.isInteger(event.partTotal) ? { partTotal: event.partTotal } : {}),
         ...(event.requestId != null ? { requestId: event.requestId } : {}),
-        ...(Number.isFinite(event.elapsedMs) ? { elapsedMs: event.elapsedMs } : {}),
         voiceId: voice,
         textLength: text.length,
         sessionId: session.id,
         operationId,
-        fragmentIndex: 0,
+        fragmentIndex: index + 1,
         fragmentTotal: session.chunks.length,
         elapsedMs: Math.max(0, this.now() - startedAt)
       };
@@ -361,70 +401,80 @@ export class PersistentReaderEngine {
         sessionId: session.id,
         state: "generating",
         event: safeEvent,
-        message: safeEvent.stage === "model-generate"
-          ? "Inferencia Kokoro local en curso…"
-          : safeEvent.stage === "wav-conversion"
-            ? "Convirtiendo la síntesis a WAV…"
-            : `Preparando el primer audio local · ${safeEvent.stage || safeEvent.phase}…`
+        message: `Generando fragmento ${index + 1}/${session.chunks.length} · ${safeEvent.stage || safeEvent.phase}…`
       });
     };
 
-    const task = this.synthesisTail.then(async () => {
-      this._assertQueuePreparationCurrent(preparation);
-      const cached = await this.repository.getAudioChunk(audioId);
-      if (cached?.blob instanceof Blob && cached.blob.size > 0) {
-        try {
-          await validateWavBlob(cached.blob);
-          this._assertQueuePreparationCurrent(preparation);
-          publishProgress({ phase: "synthesis", stage: "audio-cached", progress: 100 });
-          return cached.blob;
-        } catch (error) {
-          if (preparation.cancelled) throw error;
-          publishProgress({ phase: "synthesis", stage: "invalid-cached-wav", progress: null });
-        }
-      }
-      const blob = await this._trackProviderOperation(provider, voice, () => this.inference.synthesize(text, voice, {
-        onProgress: publishProgress
-      }));
-      this._assertQueuePreparationCurrent(preparation);
-      publishProgress({ phase: "synthesis", stage: "validating-wav", progress: null });
-      await validateWavBlob(blob);
-      this._assertQueuePreparationCurrent(preparation);
-      publishProgress({ phase: "synthesis", stage: "saving-cache", progress: null });
-      await this.repository.saveAudioChunk({
-        id: audioId, blob, voice, provider, modelId,
-        modelRevision: voiceRecord.modelRevision || null,
-        providerVersion, text, format: "wav", sampleRate, duration: null
-      });
-      return blob;
-    });
-    this.synthesisTail = task.catch(() => {});
-
     try {
-      await task;
+      await this._trackProviderOperation(provider, voice, async () => {
+        for (let index = 0; index < session.chunks.length; index++) {
+          this._assertQueuePreparationCurrent(preparation);
+          const text = session.chunks[index];
+          const audioId = await makeAudioCacheKey(text, voice, modelId, provider, providerVersion);
+          this._assertQueuePreparationCurrent(preparation);
+          publishProgress(index, text, { phase: "synthesis", stage: "request-started" });
+
+          const task = this.synthesisTail.then(async () => {
+            this._assertQueuePreparationCurrent(preparation);
+            const cached = await this.repository.getAudioChunk(audioId);
+            let blob = cached?.blob instanceof Blob && cached.blob.size > 0 ? cached.blob : null;
+            if (blob) {
+              try {
+                await validateWavBlob(blob);
+                publishProgress(index, text, { phase: "synthesis", stage: "audio-cached", progress: 100 });
+              } catch {
+                this._assertQueuePreparationCurrent(preparation);
+                blob = null;
+                publishProgress(index, text, { phase: "synthesis", stage: "invalid-cached-wav" });
+              }
+            }
+            if (!blob) {
+              blob = await this.inference.synthesize(text, voice, {
+                onProgress: (event) => publishProgress(index, text, event)
+              });
+              this._assertQueuePreparationCurrent(preparation);
+              publishProgress(index, text, { phase: "synthesis", stage: "validating-wav" });
+              await validateWavBlob(blob);
+            }
+            this._assertQueuePreparationCurrent(preparation);
+            const duration = await getWavDuration(blob);
+            publishProgress(index, text, { phase: "synthesis", stage: "saving-cache" });
+            await this.repository.saveAudioChunk({
+              ...(cached || {}), id: audioId, blob, voice, provider, modelId,
+              modelRevision: voiceRecord.modelRevision || null,
+              providerVersion, text, format: "wav", sampleRate, duration
+            });
+            return { audioId, duration };
+          });
+          this.synthesisTail = task.catch(() => {});
+          const result = await task;
+          this._assertQueuePreparationCurrent(preparation);
+          audioKeys[index] = result.audioId;
+          durations[index] = result.duration;
+          chunkStates[index] = "ready";
+          publishProgress(index, text, { phase: "synthesis", stage: "fragment-ready", progress: 100 });
+        }
+      });
+
       this._assertQueuePreparationCurrent(preparation);
       this._publish("reader:queue-audio-preparation", {
-        operationId,
-        sessionId: session.id,
-        state: "ready",
-        audioKey: audioId,
-        voiceId: voice,
-        textLength: text.length,
+        operationId, sessionId: session.id, state: "ready", audioKeys, durations, chunkStates,
+        voiceId: voice, fragmentTotal: session.chunks.length,
         elapsedMs: Math.max(0, this.now() - startedAt)
       });
-      return { audioKey: audioId };
+      return { audioKeys, durations, chunkStates };
     } catch (error) {
       const diagnostics = serializeErrorDiagnostics(error);
       this._publish("reader:queue-audio-preparation", {
         operationId,
         sessionId: session.id,
         state: "error",
-        message: error?.message || "No se pudo preparar el primer audio local.",
+        message: error?.message || "No se pudo preparar todo el audio del documento.",
         code: error?.code,
         phase: error?.phase || "synthesis",
         requestId: error?.requestId,
         voiceId: voice,
-        textLength: text.length,
+        fragmentTotal: session.chunks.length,
         elapsedMs: Math.max(0, this.now() - startedAt),
         diagnostics
       });
@@ -552,15 +602,18 @@ export class PersistentReaderEngine {
         }
         if (this.activeSession?.id === session.id && this.player.snapshot().status === "playing") return this._response();
         if (this.activeSession?.id === session.id) {
+          const durations = await this._validateCompleteSessionAudio();
+          this.activeSession = { ...this.activeSession, durations };
           const started = await this.player.play();
           await this.saveTail;
           return this._response(started);
         }
+        const durations = await this._validateCompleteSessionAudio(session);
         if (this.activeSession) {
           this.player.stop();
           await this.saveTail;
         }
-        this._applySession(session, { restore: true });
+        this._applySession({ ...session, durations }, { restore: true });
         const started = await this.player.play();
         await this.saveTail;
         return this._response(started);
@@ -600,12 +653,12 @@ export class PersistentReaderEngine {
           state: "generating",
           event: {
             phase: "synthesis", stage: "request-started", voiceId: session.voice || session.voiceId,
-            textLength: session.chunks[0].length, fragmentIndex: 0, fragmentTotal: session.chunks.length,
+            textLength: session.chunks[0].length, fragmentIndex: 1, fragmentTotal: session.chunks.length, progress: 0,
             elapsedMs: 0
           },
-          message: "Preparando el primer audio local…"
+          message: `Generando todo el documento · fragmento 1/${session.chunks.length}…`
         });
-        void this._prepareQueueFirstAudio(preparation).catch(() => {});
+        void this._prepareQueueAudio(preparation).catch(() => {});
         return { ok: true, operationId, sessionId: this.activeSession?.id || null, snapshot: this.player.snapshot() };
       }
       case "cancel-queue-audio-preparation": {

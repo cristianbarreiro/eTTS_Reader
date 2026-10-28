@@ -109,7 +109,8 @@ test("queue candidate progress is visible while the prior queue remains active u
       queueMicrotask(() => runtime.onMessage.emit({
         target: "panel", type: "reader:queue-audio-preparation", operationId: payload.operationId,
         sessionId: payload.session.id, state: "ready",
-        audioKey: "first-wav", voiceId: "af_heart", textLength: 15
+        audioKeys: ["first-wav"], durations: [1.25], chunkStates: ["ready"],
+        fragmentTotal: 1, voiceId: "af_heart"
       }));
       return {
         ok: true, sessionId: "previous-session",
@@ -131,12 +132,15 @@ test("queue candidate progress is visible while the prior queue remains active u
 
   assert.ok(updates.some((state) => state.generationStage === "model-generate" && state.generationProgress === null),
     "the UI receives an indeterminate generation state while Kokoro model.generate() runs");
-  assert.equal(result.audioKey, "first-wav");
+  assert.deepEqual(result.audioKeys, ["first-wav"]);
+  assert.deepEqual(result.durations, [1.25]);
   assert.equal(client.session.id, previous.id, "the client queue stays on the previous session until commit");
   assert.equal(client.snapshot().queuePreparation, true);
-  assert.equal(client.snapshot().generationStage, "first-wav-ready");
+  assert.equal(client.snapshot().generationStage, "document-audio-ready");
+  assert.equal(client.snapshot().knownDurationCount, 1);
+  assert.equal(client.snapshot().totalDuration, 1.25);
   assert.deepEqual(runtime.messages.map(({ command }) => command), ["prepare-queue-audio"]);
-  client.setSession({ ...candidate, audioKeys: [result.audioKey], chunkStates: ["ready"] });
+  client.setSession({ ...candidate, audioKeys: result.audioKeys, durations: result.durations, chunkStates: ["ready"] });
   assert.equal(client.snapshot().queuePreparation, undefined);
   assert.equal(client.session.id, candidate.id);
   client.dispose();
@@ -176,6 +180,42 @@ test("queue preparation errors restore the prior snapshot, and lost terminal eve
   assert.deepEqual(runtime.messages.map(({ command }) => command), ["prepare-queue-audio", "cancel-queue-audio-preparation"]);
   assert.equal(timedClient.snapshot().queuePreparation, undefined);
   timedClient.dispose();
+  client.dispose();
+});
+
+test("Play completes every missing fragment before sending the playback command", async () => {
+  let runtime;
+  runtime = fakeRuntime(async ({ command, payload }) => {
+    if (command === "prepare-queue-audio") {
+      queueMicrotask(() => runtime.onMessage.emit({
+        target: "panel", type: "reader:queue-audio-preparation", operationId: payload.operationId,
+        sessionId: payload.session.id, state: "ready",
+        audioKeys: ["wav-1", "wav-2"], durations: [12.5, 8.25], chunkStates: ["ready", "ready"], fragmentTotal: 2
+      }));
+      return { ok: true, sessionId: null, snapshot: { status: "empty", chunks: [], durations: [] } };
+    }
+    if (command === "replace") return {
+      ok: true, sessionId: payload.session.id,
+      snapshot: { ...payload.session, status: "text-ready", activeKind: "chunk", selectedIndex: 0, currentTime: 0, totalDuration: 20.75 }
+    };
+    if (command === "start") return {
+      ok: true, sessionId: payload.session.id,
+      snapshot: { ...payload.session, status: "playing", activeKind: "chunk", selectedIndex: 0, currentTime: 0, totalDuration: 20.75 }
+    };
+    return { ok: true };
+  });
+  const client = new ReaderClient({ runtime });
+  client.setSession({
+    id: "old-session", sourceText: "One. Two.", chunks: ["One.", "Two."], queuePrepared: true,
+    voice: "af_heart", audioKeys: [], durations: [null, null], chunkStates: ["pending", "pending"]
+  });
+
+  assert.equal(await client.play(), true);
+  assert.deepEqual(runtime.messages.map(({ command }) => command), ["prepare-queue-audio", "replace", "start"]);
+  const start = runtime.messages.find(({ command }) => command === "start");
+  assert.deepEqual(start.payload.session.audioKeys, ["wav-1", "wav-2"]);
+  assert.deepEqual(start.payload.session.durations, [12.5, 8.25]);
+  assert.ok(start.payload.session.chunkStates.every((state) => state === "ready"));
   client.dispose();
 });
 
